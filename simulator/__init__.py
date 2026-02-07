@@ -1,8 +1,8 @@
 """
-IICWMS Simulator Module
-Generates realistic IT scenarios for demonstration and testing.
+IICWMS Simulation Engine
+SOURCE OF TRUTH - Generates plausible enterprise behavior.
 """
 
-from .scenario_generator import ScenarioGenerator, ScenarioType, Event
+from .engine import SimulationEngine, Event, ResourceMetric, EventType
 
-__all__ = ["ScenarioGenerator", "ScenarioType", "Event"]
+__all__ = ["SimulationEngine", "Event", "ResourceMetric", "EventType"]

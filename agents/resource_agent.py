@@ -1,276 +1,223 @@
 """
 IICWMS Resource Agent
-Monitors resource consumption patterns and detects anomalies.
+=====================
+Monitors resource conditions.
 
-This agent is stateless - receives events and graph snapshots, returns structured opinions.
+INPUT:
+- Resource metrics (time-windowed)
+
+DETECTS:
+- Sustained spikes (NOT single spikes)
+- Drift trends
+
+IMPORTANT:
+- Single spikes ≠ anomaly
+- Trend slope matters
 """
 
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
-from enum import Enum
-from datetime import datetime
-import uuid
+from collections import defaultdict
+import statistics
+
+from observation import ObservedMetric
+from blackboard import SharedState, Anomaly
 
 
-class ResourceOpinionType(Enum):
-    THRESHOLD_BREACH = "THRESHOLD_BREACH"
-    TREND_ANOMALY = "TREND_ANOMALY"
-    CORRELATION_ALERT = "CORRELATION_ALERT"
-    CAPACITY_WARNING = "CAPACITY_WARNING"
+# Thresholds
+THRESHOLDS = {
+    "cpu_percent": {"warning": 70, "critical": 90, "sustained_window": 3},
+    "memory_percent": {"warning": 75, "critical": 95, "sustained_window": 3},
+    "network_latency_ms": {"warning": 200, "critical": 500, "sustained_window": 3}
+}
 
 
 @dataclass
-class ResourceOpinion:
-    """Structured opinion from resource agent."""
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    agent: str = "resource_agent"
-    opinion_type: ResourceOpinionType = ResourceOpinionType.THRESHOLD_BREACH
-    confidence: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    resource_id: str = ""
-    resource_name: str = ""
-    metric_type: str = ""
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    explanation: str = ""
+class ResourceHistory:
+    """Tracks resource metric history."""
+    resource_id: str
+    metric: str
+    values: List[Tuple[datetime, float]] = field(default_factory=list)
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "agent": self.agent,
-            "opinion_type": self.opinion_type.value,
-            "confidence": self.confidence,
-            "timestamp": self.timestamp.isoformat(),
-            "resource_id": self.resource_id,
-            "resource_name": self.resource_name,
-            "metric_type": self.metric_type,
-            "evidence": self.evidence,
-            "explanation": self.explanation
-        }
+    def add(self, timestamp: datetime, value: float):
+        self.values.append((timestamp, value))
+        # Keep only recent history
+        if len(self.values) > 100:
+            self.values = self.values[-100:]
+    
+    def get_recent(self, count: int = 10) -> List[float]:
+        return [v for _, v in self.values[-count:]]
+    
+    def compute_trend_slope(self, window: int = 5) -> float:
+        """Compute trend slope (positive = increasing)."""
+        recent = self.get_recent(window)
+        if len(recent) < 2:
+            return 0.0
+        
+        # Simple linear regression slope
+        n = len(recent)
+        x_mean = (n - 1) / 2
+        y_mean = statistics.mean(recent)
+        
+        numerator = sum((i - x_mean) * (y - y_mean) for i, y in enumerate(recent))
+        denominator = sum((i - x_mean) ** 2 for i in range(n))
+        
+        if denominator == 0:
+            return 0.0
+        return numerator / denominator
 
 
 class ResourceAgent:
     """
-    Agent responsible for resource monitoring and anomaly detection.
+    Resource Agent
     
     Detects:
-    - Threshold breaches (immediate alerts)
-    - Trend anomalies (gradual degradation)
-    - Resource correlation (multiple resources affected together)
-    - Capacity warnings (approaching limits)
+    - Sustained spikes (multiple readings above threshold)
+    - Drift trends (consistent upward movement)
     
-    Note: Detection is rule-based using thresholds.
-    LLMs are used for explanation, not detection.
+    IMPORTANT: Single spikes ≠ anomaly. Trend slope matters.
+    
+    Agents do NOT communicate directly.
+    All output goes to SharedState.
     """
-
-    def __init__(self, neo4j_client):
-        self.neo4j_client = neo4j_client
-        self.agent_name = "resource_agent"
-        
-        # Configurable thresholds
-        self.thresholds = {
-            "memory_usage": {"warning": 75, "critical": 90},
-            "cpu_usage": {"warning": 70, "critical": 85},
-            "disk_usage": {"warning": 80, "critical": 95},
-            "network_latency": {"warning": 100, "critical": 500}  # ms
-        }
-
+    
+    AGENT_NAME = "ResourceAgent"
+    
+    def __init__(self):
+        # Track resource history: resource_id -> metric -> history
+        self._history: Dict[str, Dict[str, ResourceHistory]] = defaultdict(dict)
+    
     def analyze(
         self,
-        events: List[Dict[str, Any]],
-        resource_id: Optional[str] = None
-    ) -> List[ResourceOpinion]:
+        metrics: List[ObservedMetric],
+        state: SharedState
+    ) -> List[Anomaly]:
         """
-        Analyze resource metrics for anomalies.
+        Analyze resource metrics and detect anomalies.
         
-        Args:
-            events: List of resource metric events
-            resource_id: Optional filter for specific resource
-            
-        Returns:
-            List of ResourceOpinion objects
+        Returns anomalies found (also written to state).
         """
-        opinions = []
+        anomalies = []
         
-        # Filter to resource events
-        resource_events = [
-            e for e in events 
-            if e.get("event_type") == "RESOURCE_METRIC"
-            and (resource_id is None or e.get("resource_id") == resource_id)
-        ]
-        
-        if not resource_events:
-            return opinions
-        
-        # Group events by resource
-        by_resource = {}
-        for event in resource_events:
-            rid = event.get("resource_id", "unknown")
-            if rid not in by_resource:
-                by_resource[rid] = []
-            by_resource[rid].append(event)
-        
-        # Analyze each resource
-        for rid, events_list in by_resource.items():
-            # Check for threshold breaches
-            breach_opinions = self._detect_threshold_breaches(rid, events_list)
-            opinions.extend(breach_opinions)
-            
-            # Check for trend anomalies
-            trend_opinions = self._detect_trend_anomalies(rid, events_list)
-            opinions.extend(trend_opinions)
-        
-        # Check for correlated resource issues
-        correlation_opinions = self._detect_correlations(by_resource)
-        opinions.extend(correlation_opinions)
-        
-        return opinions
-
-    def _detect_threshold_breaches(
-        self,
-        resource_id: str,
-        events: List[Dict[str, Any]]
-    ) -> List[ResourceOpinion]:
-        """Detect immediate threshold breaches."""
-        opinions = []
-        
-        for event in events:
-            metadata = event.get("metadata", {})
-            metric_type = metadata.get("metric_type", "unknown")
-            value = metadata.get("value", 0)
-            threshold = metadata.get("threshold")
-            
-            # Use event's threshold or fall back to our defaults
-            if threshold is None and metric_type in self.thresholds:
-                threshold = self.thresholds[metric_type]["critical"]
-            
-            if threshold and value > threshold:
-                # Determine severity based on how much over threshold
-                overage = (value - threshold) / threshold
-                confidence = min(0.95, 0.7 + overage * 0.25)
-                
-                opinion = ResourceOpinion(
-                    opinion_type=ResourceOpinionType.THRESHOLD_BREACH,
-                    confidence=confidence,
-                    resource_id=resource_id,
-                    metric_type=metric_type,
-                    evidence={
-                        "event_id": event.get("id"),
-                        "timestamp": event.get("timestamp"),
-                        "metric_value": value,
-                        "threshold": threshold,
-                        "overage_percent": round(overage * 100, 2),
-                        "unit": metadata.get("unit", "unknown")
-                    },
-                    explanation=f"Resource {metric_type} at {value}% exceeds threshold of "
-                               f"{threshold}% by {overage*100:.1f}%. Immediate attention may be required."
-                )
-                opinions.append(opinion)
-        
-        return opinions
-
-    def _detect_trend_anomalies(
-        self,
-        resource_id: str,
-        events: List[Dict[str, Any]]
-    ) -> List[ResourceOpinion]:
-        """Detect gradual degradation trends (Resource Vampire pattern)."""
-        opinions = []
-        
-        # Group by metric type
-        by_metric = {}
-        for event in events:
-            metadata = event.get("metadata", {})
-            metric_type = metadata.get("metric_type", "unknown")
-            if metric_type not in by_metric:
-                by_metric[metric_type] = []
-            by_metric[metric_type].append({
-                "timestamp": event.get("timestamp"),
-                "value": metadata.get("value", 0)
-            })
-        
-        for metric_type, data_points in by_metric.items():
-            if len(data_points) < 3:
+        # Group metrics by resource
+        for metric in metrics:
+            if metric.metric not in THRESHOLDS:
                 continue
             
-            # Sort by timestamp
-            data_points.sort(key=lambda x: x["timestamp"])
-            
-            # Calculate trend
-            values = [d["value"] for d in data_points]
-            first_third = sum(values[:len(values)//3]) / (len(values)//3 or 1)
-            last_third = sum(values[-len(values)//3:]) / (len(values)//3 or 1)
-            
-            # Detect increasing trend
-            if last_third > first_third * 1.3:  # 30% increase
-                trend_increase = (last_third - first_third) / first_third * 100
-                
-                opinion = ResourceOpinion(
-                    opinion_type=ResourceOpinionType.TREND_ANOMALY,
-                    confidence=min(0.90, 0.6 + trend_increase / 200),
-                    resource_id=resource_id,
-                    metric_type=metric_type,
-                    evidence={
-                        "metric_type": metric_type,
-                        "initial_average": round(first_third, 2),
-                        "current_average": round(last_third, 2),
-                        "trend_increase_percent": round(trend_increase, 2),
-                        "data_points": len(data_points),
-                        "time_range": {
-                            "start": data_points[0]["timestamp"],
-                            "end": data_points[-1]["timestamp"]
-                        }
-                    },
-                    explanation=f"Gradual increase detected in {metric_type}. "
-                               f"Average increased from {first_third:.1f}% to {last_third:.1f}% "
-                               f"({trend_increase:.1f}% increase). This pattern may indicate "
-                               f"a 'Resource Vampire' condition."
+            # Get or create history
+            if metric.metric not in self._history[metric.resource_id]:
+                self._history[metric.resource_id][metric.metric] = ResourceHistory(
+                    resource_id=metric.resource_id,
+                    metric=metric.metric
                 )
-                opinions.append(opinion)
+            
+            history = self._history[metric.resource_id][metric.metric]
+            history.add(metric.timestamp, metric.value)
         
-        return opinions
-
-    def _detect_correlations(
+        # Analyze each resource's metrics
+        for resource_id, metrics_dict in self._history.items():
+            for metric_name, history in metrics_dict.items():
+                threshold_config = THRESHOLDS[metric_name]
+                
+                # Check for SUSTAINED spike
+                anomaly = self._check_sustained_spike(
+                    resource_id, metric_name, history, threshold_config, state
+                )
+                if anomaly:
+                    anomalies.append(anomaly)
+                
+                # Check for DRIFT trend
+                anomaly = self._check_drift_trend(
+                    resource_id, metric_name, history, threshold_config, state
+                )
+                if anomaly:
+                    anomalies.append(anomaly)
+        
+        return anomalies
+    
+    def _check_sustained_spike(
         self,
-        events_by_resource: Dict[str, List[Dict[str, Any]]]
-    ) -> List[ResourceOpinion]:
-        """Detect correlated issues across multiple resources."""
-        opinions = []
+        resource_id: str,
+        metric_name: str,
+        history: ResourceHistory,
+        config: Dict,
+        state: SharedState
+    ) -> Anomaly | None:
+        """
+        Check for sustained spike (NOT single spike).
         
-        # Find resources with threshold breaches
-        breaching_resources = []
-        for resource_id, events in events_by_resource.items():
-            for event in events:
-                metadata = event.get("metadata", {})
-                if metadata.get("threshold_breached", False):
-                    breaching_resources.append({
-                        "resource_id": resource_id,
-                        "metric_type": metadata.get("metric_type"),
-                        "timestamp": event.get("timestamp"),
-                        "value": metadata.get("value")
-                    })
-                    break  # One breach per resource is enough
+        Requires multiple consecutive readings above threshold.
+        """
+        sustained_window = config["sustained_window"]
+        warning_threshold = config["warning"]
+        critical_threshold = config["critical"]
         
-        # If multiple resources are breaching, it might be correlated
-        if len(breaching_resources) >= 2:
-            opinion = ResourceOpinion(
-                opinion_type=ResourceOpinionType.CORRELATION_ALERT,
-                confidence=0.85,
-                resource_id="multiple",
-                metric_type="multiple",
-                evidence={
-                    "affected_resources": breaching_resources,
-                    "resource_count": len(breaching_resources),
-                    "pattern": "simultaneous_breach"
-                },
-                explanation=f"Multiple resources ({len(breaching_resources)}) are experiencing "
-                           f"threshold breaches simultaneously. This correlation suggests a "
-                           f"common cause or cascading failure. Probable causal relationships, "
-                           f"not formal proof."
+        recent = history.get_recent(sustained_window)
+        if len(recent) < sustained_window:
+            return None
+        
+        # Check if ALL readings in window exceed critical
+        if all(v >= critical_threshold for v in recent):
+            return state.add_anomaly(
+                type="SUSTAINED_RESOURCE_CRITICAL",
+                agent=self.AGENT_NAME,
+                evidence=[f"{resource_id}/{metric_name}/last_{sustained_window}"],
+                description=f"Resource {resource_id} has {metric_name} at critical level ({statistics.mean(recent):.1f}) for {sustained_window} consecutive readings",
+                confidence=0.9
             )
-            opinions.append(opinion)
         
-        return opinions
-
-    def get_ripple_effect(self, resource_id: str) -> List[Dict]:
-        """Query graph for downstream impact of resource issues."""
-        return self.neo4j_client.get_ripple_effect(resource_id)
+        # Check if ALL readings in window exceed warning
+        if all(v >= warning_threshold for v in recent):
+            return state.add_anomaly(
+                type="SUSTAINED_RESOURCE_WARNING",
+                agent=self.AGENT_NAME,
+                evidence=[f"{resource_id}/{metric_name}/last_{sustained_window}"],
+                description=f"Resource {resource_id} has {metric_name} at elevated level ({statistics.mean(recent):.1f}) for {sustained_window} consecutive readings",
+                confidence=0.75
+            )
+        
+        return None
+    
+    def _check_drift_trend(
+        self,
+        resource_id: str,
+        metric_name: str,
+        history: ResourceHistory,
+        config: Dict,
+        state: SharedState
+    ) -> Anomaly | None:
+        """
+        Check for drift trend (consistent upward movement).
+        
+        Detects slow but steady resource degradation.
+        """
+        slope = history.compute_trend_slope(window=5)
+        
+        # Significant upward drift (slope > 2 means ~2 units increase per reading)
+        if slope > 2.0:
+            return state.add_anomaly(
+                type="RESOURCE_DRIFT",
+                agent=self.AGENT_NAME,
+                evidence=[f"{resource_id}/{metric_name}/trend"],
+                description=f"Resource {resource_id} shows upward drift in {metric_name} (slope: {slope:.2f})",
+                confidence=0.7
+            )
+        
+        return None
+    
+    def get_resource_summary(self, resource_id: str) -> Dict[str, Any]:
+        """Get summary of resource state."""
+        summary = {"resource_id": resource_id, "metrics": {}}
+        
+        if resource_id in self._history:
+            for metric_name, history in self._history[resource_id].items():
+                recent = history.get_recent(5)
+                if recent:
+                    summary["metrics"][metric_name] = {
+                        "current": recent[-1],
+                        "avg": statistics.mean(recent),
+                        "trend": history.compute_trend_slope()
+                    }
+        
+        return summary

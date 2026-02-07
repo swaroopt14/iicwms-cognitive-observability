@@ -1,253 +1,195 @@
 """
 IICWMS Workflow Agent
-Detects workflow anomalies: skipped steps, out-of-order execution, incomplete workflows.
+=====================
+Detects workflow anomalies.
 
-This agent is stateless - receives events and graph snapshots, returns structured opinions.
+INPUT:
+- Workflow events
+- Expected step durations
+
+DETECTS:
+- Delays
+- Missing steps
+- Sequence violations
+
+OUTPUT:
+{
+  "type": "WORKFLOW_DELAY",
+  "workflow_id": "wf_12",
+  "evidence": ["step_DEPLOY exceeded SLA"]
+}
 """
 
-from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
-from enum import Enum
-from datetime import datetime
-import uuid
+from dataclasses import dataclass
+
+from observation import ObservedEvent
+from blackboard import SharedState, Anomaly
 
 
-class OpinionType(Enum):
-    WORKFLOW_DEVIATION = "WORKFLOW_DEVIATION"
-    STEP_SKIPPED = "STEP_SKIPPED"
-    OUT_OF_ORDER = "OUT_OF_ORDER"
-    INCOMPLETE_WORKFLOW = "INCOMPLETE_WORKFLOW"
+# Expected workflow definitions (should match simulator)
+WORKFLOW_DEFINITIONS = {
+    "wf_onboarding": {
+        "name": "User Onboarding",
+        "steps": ["init", "validate", "provision", "deploy", "verify", "notify"],
+        "step_sla_seconds": {"init": 10, "validate": 30, "provision": 60, "deploy": 240, "verify": 120, "notify": 20}
+    },
+    "wf_deployment": {
+        "name": "Service Deployment",
+        "steps": ["build", "test", "staging", "approval", "production", "complete"],
+        "step_sla_seconds": {"build": 120, "test": 240, "staging": 60, "approval": 600, "production": 120, "complete": 10}
+    },
+    "wf_expense": {
+        "name": "Expense Reimbursement",
+        "steps": ["submit", "manager_review", "finance_approval", "payment", "complete"],
+        "step_sla_seconds": {"submit": 10, "manager_review": 60, "finance_approval": 120, "payment": 30, "complete": 10}
+    },
+    "wf_access": {
+        "name": "Access Request",
+        "steps": ["request", "security_review", "provisioning", "complete"],
+        "step_sla_seconds": {"request": 10, "security_review": 90, "provisioning": 60, "complete": 10}
+    },
+}
 
 
 @dataclass
-class Opinion:
-    """Structured opinion from an agent - the unit of evidence."""
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    agent: str = "workflow_agent"
-    opinion_type: OpinionType = OpinionType.WORKFLOW_DEVIATION
-    confidence: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    explanation: str = ""
+class WorkflowState:
+    """Tracks workflow execution state."""
+    workflow_id: str
+    workflow_type: str
+    current_step_index: int = 0
+    started_at: Optional[datetime] = None
+    step_started_at: Optional[datetime] = None
+    completed_steps: List[str] = None
+    skipped_steps: List[str] = None
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "agent": self.agent,
-            "opinion_type": self.opinion_type.value,
-            "confidence": self.confidence,
-            "timestamp": self.timestamp.isoformat(),
-            "evidence": self.evidence,
-            "explanation": self.explanation
-        }
+    def __post_init__(self):
+        if self.completed_steps is None:
+            self.completed_steps = []
+        if self.skipped_steps is None:
+            self.skipped_steps = []
 
 
 class WorkflowAgent:
     """
-    Agent responsible for workflow integrity monitoring.
+    Workflow Agent
     
     Detects:
-    - Skipped mandatory steps
-    - Out-of-order step execution
-    - Incomplete or abandoned workflows
+    - Delays (step exceeds SLA)
+    - Missing steps (steps skipped)
+    - Sequence violations (out-of-order execution)
     
-    Note: This agent uses graph queries for detection, not LLM inference.
-    LLMs are used for explanation, not detection.
+    Agents do NOT communicate directly.
+    All output goes to SharedState.
     """
-
-    def __init__(self, neo4j_client):
-        self.neo4j_client = neo4j_client
-        self.agent_name = "workflow_agent"
-
+    
+    AGENT_NAME = "WorkflowAgent"
+    
+    def __init__(self):
+        # Track active workflows
+        self._workflows: Dict[str, WorkflowState] = {}
+    
     def analyze(
         self,
-        workflow_id: str,
-        events: List[Dict[str, Any]]
-    ) -> List[Opinion]:
+        events: List[ObservedEvent],
+        state: SharedState
+    ) -> List[Anomaly]:
         """
-        Analyze a workflow for anomalies.
+        Analyze workflow events and detect anomalies.
         
-        Args:
-            workflow_id: ID of the workflow to analyze
-            events: List of events that occurred in this workflow
+        Returns anomalies found (also written to state).
+        """
+        anomalies = []
+        
+        # Process events in chronological order
+        sorted_events = sorted(events, key=lambda e: e.timestamp)
+        
+        for event in sorted_events:
+            if not event.workflow_id:
+                continue
             
-        Returns:
-            List of Opinion objects representing detected anomalies
-        """
-        opinions = []
-        
-        # Check for skipped steps
-        skipped_opinions = self._detect_skipped_steps(workflow_id, events)
-        opinions.extend(skipped_opinions)
-        
-        # Check for out-of-order execution
-        order_opinions = self._detect_out_of_order(workflow_id, events)
-        opinions.extend(order_opinions)
-        
-        # Check for incomplete workflows
-        incomplete_opinions = self._detect_incomplete_workflow(workflow_id, events)
-        opinions.extend(incomplete_opinions)
-        
-        return opinions
-
-    def _detect_skipped_steps(
-        self,
-        workflow_id: str,
-        events: List[Dict[str, Any]]
-    ) -> List[Opinion]:
-        """Detect mandatory steps that were skipped."""
-        opinions = []
-        
-        # Query graph for workflow structure
-        workflow_state = self.neo4j_client.get_workflow_state(workflow_id)
-        if not workflow_state:
-            return opinions
-        
-        steps = workflow_state.get("steps", [])
-        mandatory_steps = [s for s in steps if s.get("mandatory", False)]
-        
-        # Find which steps have completion events
-        completed_step_ids = set()
-        for event in events:
-            if event.get("event_type") == "WORKFLOW_STEP_COMPLETE":
-                completed_step_ids.add(event.get("step_id"))
-        
-        # Check for skipped mandatory steps
-        for step in mandatory_steps:
-            if step["id"] not in completed_step_ids:
-                # Check if workflow progressed past this step
-                step_sequence = step.get("sequence", 0)
-                later_completed = any(
-                    s.get("sequence", 0) > step_sequence 
-                    for s in steps 
-                    if s["id"] in completed_step_ids
+            # Extract workflow type from ID (e.g., "wf_deploy_abc123" -> "wf_deploy")
+            workflow_type = self._extract_workflow_type(event.workflow_id)
+            if not workflow_type or workflow_type not in WORKFLOW_DEFINITIONS:
+                continue
+            
+            # Get or create workflow state
+            if event.workflow_id not in self._workflows:
+                self._workflows[event.workflow_id] = WorkflowState(
+                    workflow_id=event.workflow_id,
+                    workflow_type=workflow_type
                 )
+            
+            wf = self._workflows[event.workflow_id]
+            definition = WORKFLOW_DEFINITIONS[workflow_type]
+            
+            # Handle different event types
+            if event.type == "WORKFLOW_START":
+                wf.started_at = event.timestamp
+            
+            elif event.type == "WORKFLOW_STEP_START":
+                step = event.metadata.get("step")
+                if step:
+                    wf.step_started_at = event.timestamp
+                    # Check for sequence violation
+                    expected_index = event.metadata.get("step_index", 0)
+                    if expected_index != wf.current_step_index:
+                        anomaly = state.add_anomaly(
+                            type="SEQUENCE_VIOLATION",
+                            agent=self.AGENT_NAME,
+                            evidence=[event.event_id],
+                            description=f"Step '{step}' started at index {expected_index}, expected {wf.current_step_index}",
+                            confidence=0.9
+                        )
+                        anomalies.append(anomaly)
+            
+            elif event.type == "WORKFLOW_STEP_COMPLETE":
+                step = event.metadata.get("step")
+                duration = event.metadata.get("duration_seconds", 0)
                 
-                if later_completed:
-                    opinion = Opinion(
-                        opinion_type=OpinionType.STEP_SKIPPED,
-                        confidence=0.95,
-                        evidence={
-                            "workflow_id": workflow_id,
-                            "skipped_step_id": step["id"],
-                            "skipped_step_name": step.get("name", "Unknown"),
-                            "expected_sequence": step_sequence,
-                            "completed_steps": list(completed_step_ids),
-                            "detection_method": "graph_query"
-                        },
-                        explanation=f"Mandatory step '{step.get('name', step['id'])}' was skipped. "
-                                   f"Later steps in the workflow were completed, indicating this step "
-                                   f"was bypassed rather than pending."
+                if step:
+                    wf.completed_steps.append(step)
+                    wf.current_step_index += 1
+                    
+                    # Check for SLA violation (delay)
+                    sla = definition["step_sla_seconds"].get(step, 60)
+                    if duration > sla:
+                        anomaly = state.add_anomaly(
+                            type="WORKFLOW_DELAY",
+                            agent=self.AGENT_NAME,
+                            evidence=[event.event_id],
+                            description=f"Step '{step}' took {duration}s, exceeded SLA of {sla}s",
+                            confidence=0.85
+                        )
+                        anomalies.append(anomaly)
+            
+            elif event.type == "WORKFLOW_STEP_SKIP":
+                skipped_step = event.metadata.get("skipped_step")
+                if skipped_step:
+                    wf.skipped_steps.append(skipped_step)
+                    wf.current_step_index += 1  # Move past skipped step
+                    
+                    # MISSING STEP detected
+                    anomaly = state.add_anomaly(
+                        type="MISSING_STEP",
+                        agent=self.AGENT_NAME,
+                        evidence=[event.event_id],
+                        description=f"Step '{skipped_step}' was skipped in workflow {event.workflow_id}",
+                        confidence=0.95
                     )
-                    opinions.append(opinion)
+                    anomalies.append(anomaly)
         
-        return opinions
-
-    def _detect_out_of_order(
-        self,
-        workflow_id: str,
-        events: List[Dict[str, Any]]
-    ) -> List[Opinion]:
-        """Detect steps executed out of their defined order."""
-        opinions = []
-        
-        # Get workflow structure from graph
-        workflow_state = self.neo4j_client.get_workflow_state(workflow_id)
-        if not workflow_state:
-            return opinions
-        
-        steps = {s["id"]: s for s in workflow_state.get("steps", [])}
-        
-        # Build completion timeline
-        completions = []
-        for event in events:
-            if event.get("event_type") == "WORKFLOW_STEP_COMPLETE":
-                step_id = event.get("step_id")
-                if step_id in steps:
-                    completions.append({
-                        "step_id": step_id,
-                        "sequence": steps[step_id].get("sequence", 0),
-                        "timestamp": event.get("timestamp")
-                    })
-        
-        # Sort by timestamp and check sequence
-        completions.sort(key=lambda x: x["timestamp"])
-        
-        for i in range(len(completions) - 1):
-            current = completions[i]
-            next_step = completions[i + 1]
-            
-            if current["sequence"] > next_step["sequence"]:
-                opinion = Opinion(
-                    opinion_type=OpinionType.OUT_OF_ORDER,
-                    confidence=0.90,
-                    evidence={
-                        "workflow_id": workflow_id,
-                        "expected_order": [current["step_id"], next_step["step_id"]],
-                        "actual_order": [next_step["step_id"], current["step_id"]],
-                        "timestamps": {
-                            current["step_id"]: current["timestamp"],
-                            next_step["step_id"]: next_step["timestamp"]
-                        }
-                    },
-                    explanation=f"Steps were executed out of order. Step with sequence "
-                               f"{next_step['sequence']} completed before step with sequence "
-                               f"{current['sequence']}."
-                )
-                opinions.append(opinion)
-        
-        return opinions
-
-    def _detect_incomplete_workflow(
-        self,
-        workflow_id: str,
-        events: List[Dict[str, Any]]
-    ) -> List[Opinion]:
-        """Detect workflows that appear to be abandoned or incomplete."""
-        opinions = []
-        
-        workflow_state = self.neo4j_client.get_workflow_state(workflow_id)
-        if not workflow_state:
-            return opinions
-        
-        steps = workflow_state.get("steps", [])
-        total_steps = len(steps)
-        
-        # Count completed steps
-        completed_step_ids = set()
-        for event in events:
-            if event.get("event_type") == "WORKFLOW_STEP_COMPLETE":
-                completed_step_ids.add(event.get("step_id"))
-        
-        completed_count = len(completed_step_ids)
-        
-        # Check if workflow started but didn't finish
-        if 0 < completed_count < total_steps:
-            # Check for workflow completion event
-            has_completion = any(
-                e.get("event_type") == "WORKFLOW_COMPLETE" 
-                for e in events
-            )
-            
-            if not has_completion:
-                completion_ratio = completed_count / total_steps
-                opinion = Opinion(
-                    opinion_type=OpinionType.INCOMPLETE_WORKFLOW,
-                    confidence=0.75 if completion_ratio < 0.5 else 0.60,
-                    evidence={
-                        "workflow_id": workflow_id,
-                        "total_steps": total_steps,
-                        "completed_steps": completed_count,
-                        "completion_ratio": completion_ratio,
-                        "missing_steps": [
-                            s["id"] for s in steps 
-                            if s["id"] not in completed_step_ids
-                        ]
-                    },
-                    explanation=f"Workflow appears incomplete. Only {completed_count} of "
-                               f"{total_steps} steps were completed ({completion_ratio:.0%}), "
-                               f"and no workflow completion event was recorded."
-                )
-                opinions.append(opinion)
-        
-        return opinions
+        return anomalies
+    
+    def _extract_workflow_type(self, workflow_id: str) -> Optional[str]:
+        """Extract workflow type from instance ID."""
+        # Pattern: wf_type_instanceid
+        for wf_type in WORKFLOW_DEFINITIONS.keys():
+            if workflow_id.startswith(wf_type):
+                return wf_type
+        return None
+    
+    def get_tracked_workflows(self) -> Dict[str, WorkflowState]:
+        """Get currently tracked workflows."""
+        return self._workflows.copy()

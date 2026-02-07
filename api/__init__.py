@@ -1,4 +1,7 @@
 """
-IICWMS API Module
-FastAPI-based REST API for system interaction.
+IICWMS API Layer
 """
+
+from .server import app
+
+__all__ = ["app"]

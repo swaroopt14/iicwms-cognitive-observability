@@ -1,395 +1,272 @@
 """
-IICWMS Master Agent
-Synthesizes opinions from all agents, resolves conflicts, and generates final insights.
+IICWMS Master Agent (Sovereign Orchestrator)
+============================================
+COORDINATOR ONLY.
 
-Agents are coordinated through a shared evidence substrate (the Blackboard).
-The Master Agent orchestrates this coordination.
+RESPONSIBILITIES:
+- Trigger agents (async)
+- Collect outputs
+- Rank severity
+- Trigger explanation
+
+FORBIDDEN:
+- No deep reasoning (delegates to specialized agents)
+- No LLM usage (only Explanation Engine uses LLM)
 """
 
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
-from enum import Enum
 from datetime import datetime
-import uuid
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+import concurrent.futures
+
+from observation import ObservationLayer, ObservedEvent, ObservedMetric
+from blackboard import (
+    SharedState, ReasoningCycle,
+    Anomaly, PolicyHit, RiskSignal, CausalLink, Recommendation
+)
+from .workflow_agent import WorkflowAgent
+from .resource_agent import ResourceAgent
+from .compliance_agent import ComplianceAgent
+from .risk_forecast_agent import RiskForecastAgent
+from .causal_agent import CausalAgent
+from .adaptive_baseline_agent import AdaptiveBaselineAgent
 
 
-class InsightSeverity(Enum):
-    CRITICAL = "CRITICAL"
-    HIGH = "HIGH"
-    MEDIUM = "MEDIUM"
-    LOW = "LOW"
-    INFO = "INFO"
-
-
-class InsightCategory(Enum):
-    COMPLIANCE_VIOLATION = "COMPLIANCE_VIOLATION"
-    WORKFLOW_ANOMALY = "WORKFLOW_ANOMALY"
-    RESOURCE_ISSUE = "RESOURCE_ISSUE"
-    SECURITY_CONCERN = "SECURITY_CONCERN"
-    OPERATIONAL_WARNING = "OPERATIONAL_WARNING"
+# Solution mapping (solutions are mapped, not invented)
+SOLUTION_MAP = {
+    "SUSTAINED_RESOURCE_CRITICAL": {
+        "action": "Throttle jobs or scale resources",
+        "urgency": "HIGH",
+        "rationale": "Resource saturation will cause cascading failures"
+    },
+    "SUSTAINED_RESOURCE_WARNING": {
+        "action": "Monitor closely, prepare scaling plan",
+        "urgency": "MEDIUM",
+        "rationale": "Early intervention prevents escalation"
+    },
+    "RESOURCE_DRIFT": {
+        "action": "Investigate root cause of resource growth",
+        "urgency": "LOW",
+        "rationale": "Drift indicates potential leak or inefficiency"
+    },
+    "WORKFLOW_DELAY": {
+        "action": "Pre-notify admins of SLA pressure",
+        "urgency": "MEDIUM",
+        "rationale": "Delays compound and affect downstream processes"
+    },
+    "MISSING_STEP": {
+        "action": "Apply temporary access guard and audit",
+        "urgency": "HIGH",
+        "rationale": "Skipped steps may bypass critical controls"
+    },
+    "SEQUENCE_VIOLATION": {
+        "action": "Review workflow execution and enforce ordering",
+        "urgency": "MEDIUM",
+        "rationale": "Out-of-order execution indicates process breakdown"
+    },
+    "SILENT": {  # Policy violation
+        "action": "Flag for compliance review",
+        "urgency": "HIGH",
+        "rationale": "Silent violations accumulate audit risk"
+    }
+}
 
 
 @dataclass
-class Insight:
-    """Final insight synthesized from multiple agent opinions."""
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    timestamp: datetime = field(default_factory=datetime.utcnow)
-    category: InsightCategory = InsightCategory.OPERATIONAL_WARNING
-    severity: InsightSeverity = InsightSeverity.MEDIUM
-    title: str = ""
-    summary: str = ""
-    confidence: float = 0.0
-    contributing_opinions: List[str] = field(default_factory=list)
-    evidence_chain: List[Dict[str, Any]] = field(default_factory=list)
-    recommended_actions: List[str] = field(default_factory=list)
-    explanation: str = ""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "id": self.id,
-            "timestamp": self.timestamp.isoformat(),
-            "category": self.category.value,
-            "severity": self.severity.value,
-            "title": self.title,
-            "summary": self.summary,
-            "confidence": self.confidence,
-            "contributing_opinions": self.contributing_opinions,
-            "evidence_chain": self.evidence_chain,
-            "recommended_actions": self.recommended_actions,
-            "explanation": self.explanation
-        }
+class CycleResult:
+    """Result of a reasoning cycle."""
+    cycle_id: str
+    anomaly_count: int
+    policy_hit_count: int
+    risk_signal_count: int
+    causal_link_count: int
+    recommendation_count: int
+    duration_ms: float
 
 
 class MasterAgent:
     """
-    Master Agent responsible for:
-    1. Orchestrating specialized agents
-    2. Synthesizing opinions into insights
-    3. Resolving conflicting opinions
-    4. Generating human-readable explanations
+    Master Agent (Sovereign Orchestrator)
     
-    Note: LLMs are used for explanation, not detection.
-    The Master Agent coordinates but does not override agent opinions.
+    Coordinates specialized agents. Does NOT perform deep reasoning.
+    
+    Reasoning Cycle Flow:
+    1. Observation ingest
+    2. Master Agent starts cycle
+    3. Agents run in parallel
+    4. State populated
+    5. Causal synthesis
+    6. Recommendations generated
+    
+    If this loop breaks → system fails.
     """
-
+    
+    AGENT_NAME = "MasterAgent"
+    
     def __init__(
         self,
-        neo4j_client,
-        evidence_store,
-        llm_client: Optional[Any] = None
+        observation: ObservationLayer,
+        state: SharedState
     ):
-        self.neo4j_client = neo4j_client
-        self.evidence_store = evidence_store
-        self.llm_client = llm_client
-        self.agent_name = "master_agent"
+        self._observation = observation
+        self._state = state
         
-        # Import specialized agents
-        from .workflow_agent import WorkflowAgent
-        from .policy_agent import PolicyAgent
-        from .resource_agent import ResourceAgent
-        from .rca_agent import RCAAgent
-        
-        # Initialize agent mesh
-        self.workflow_agent = WorkflowAgent(neo4j_client)
-        self.policy_agent = PolicyAgent(neo4j_client)
-        self.resource_agent = ResourceAgent(neo4j_client)
-        self.rca_agent = RCAAgent(neo4j_client)
-
-    def analyze(
-        self,
-        events: List[Dict[str, Any]],
-        context: Optional[Dict[str, Any]] = None
-    ) -> List[Insight]:
+        # Initialize specialized agents
+        self._workflow_agent = WorkflowAgent()
+        self._resource_agent = ResourceAgent()
+        self._compliance_agent = ComplianceAgent()
+        self._risk_forecast_agent = RiskForecastAgent()
+        self._causal_agent = CausalAgent()
+        self._adaptive_baseline_agent = AdaptiveBaselineAgent()
+    
+    def run_cycle(self) -> CycleResult:
         """
-        Orchestrate all agents and synthesize insights.
+        Execute one complete reasoning cycle.
         
-        Args:
-            events: List of events to analyze
-            context: Additional context (workflow_id, resource_id, etc.)
-            
-        Returns:
-            List of synthesized Insight objects
+        This is the MANDATORY FLOW:
+        1. Start cycle
+        2. Get observations
+        3. Run specialized agents (parallel)
+        4. Run risk forecast
+        5. Run causal analysis
+        6. Generate recommendations
+        7. Complete cycle
         """
-        all_opinions = []
-        context = context or {}
+        start_time = datetime.utcnow()
         
-        # Phase 1: Collect opinions from specialized agents
+        # 1. Start cycle
+        cycle_id = self._state.start_cycle()
         
-        # Workflow analysis
-        if "workflow_id" in context:
-            workflow_opinions = self.workflow_agent.analyze(
-                context["workflow_id"],
-                events
+        # 2. Get recent observations
+        events = self._observation.get_recent_events(count=100)
+        metrics = self._observation.get_recent_metrics(count=100)
+        
+        # 3. Run specialized agents in parallel
+        anomalies = []
+        policy_hits = []
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # Submit parallel tasks
+            workflow_future = executor.submit(
+                self._workflow_agent.analyze, events, self._state
             )
-            all_opinions.extend([o.to_dict() for o in workflow_opinions])
-        
-        # Policy analysis
-        policy_opinions = self.policy_agent.analyze(events, context)
-        all_opinions.extend([o.to_dict() for o in policy_opinions])
-        
-        # Resource analysis
-        resource_opinions = self.resource_agent.analyze(
-            events,
-            context.get("resource_id")
-        )
-        all_opinions.extend([o.to_dict() for o in resource_opinions])
-        
-        # Phase 2: Log all opinions to evidence store
-        for opinion in all_opinions:
-            self.evidence_store.append(opinion)
-        
-        # Phase 3: RCA analysis on detected anomalies
-        if all_opinions:
-            rca_opinions = self.rca_agent.analyze(all_opinions, events, context)
-            for opinion in rca_opinions:
-                opinion_dict = opinion.to_dict()
-                all_opinions.append(opinion_dict)
-                self.evidence_store.append(opinion_dict)
-        
-        # Phase 4: Synthesize insights from opinions
-        insights = self._synthesize_insights(all_opinions)
-        
-        return insights
-
-    def _synthesize_insights(
-        self,
-        opinions: List[Dict[str, Any]]
-    ) -> List[Insight]:
-        """Synthesize opinions into actionable insights."""
-        insights = []
-        
-        # Group opinions by type/category
-        groups = self._group_opinions(opinions)
-        
-        for category, category_opinions in groups.items():
-            if not category_opinions:
-                continue
+            resource_future = executor.submit(
+                self._resource_agent.analyze, metrics, self._state
+            )
+            compliance_future = executor.submit(
+                self._compliance_agent.analyze, events, self._state
+            )
+            baseline_future = executor.submit(
+                self._adaptive_baseline_agent.analyze, metrics, self._state
+            )
             
-            insight = self._create_insight_from_group(category, category_opinions)
-            if insight:
-                insights.append(insight)
+            # Collect results
+            anomalies.extend(workflow_future.result())
+            anomalies.extend(resource_future.result())
+            policy_hits.extend(compliance_future.result())
+            anomalies.extend(baseline_future.result())  # Baseline deviations
         
-        # Sort by severity
-        severity_order = {
-            InsightSeverity.CRITICAL: 0,
-            InsightSeverity.HIGH: 1,
-            InsightSeverity.MEDIUM: 2,
-            InsightSeverity.LOW: 3,
-            InsightSeverity.INFO: 4
-        }
-        insights.sort(key=lambda x: severity_order.get(x.severity, 99))
-        
-        return insights
-
-    def _group_opinions(
-        self,
-        opinions: List[Dict[str, Any]]
-    ) -> Dict[str, List[Dict[str, Any]]]:
-        """Group opinions by their category."""
-        groups = {
-            "workflow": [],
-            "policy": [],
-            "resource": [],
-            "rca": []
-        }
-        
-        for opinion in opinions:
-            agent = opinion.get("agent", "")
-            opinion_type = opinion.get("opinion_type", "")
-            
-            if agent == "workflow_agent" or "WORKFLOW" in opinion_type:
-                groups["workflow"].append(opinion)
-            elif agent == "policy_agent" or "POLICY" in opinion_type:
-                groups["policy"].append(opinion)
-            elif agent == "resource_agent" or "RESOURCE" in opinion_type or "THRESHOLD" in opinion_type:
-                groups["resource"].append(opinion)
-            elif agent == "rca_agent" or "CAUSAL" in opinion_type or "ROOT_CAUSE" in opinion_type:
-                groups["rca"].append(opinion)
-        
-        return groups
-
-    def _create_insight_from_group(
-        self,
-        category: str,
-        opinions: List[Dict[str, Any]]
-    ) -> Optional[Insight]:
-        """Create an insight from a group of related opinions."""
-        if not opinions:
-            return None
-        
-        # Calculate aggregate confidence
-        confidences = [o.get("confidence", 0.5) for o in opinions]
-        avg_confidence = sum(confidences) / len(confidences)
-        max_confidence = max(confidences)
-        
-        # Use weighted confidence (favor higher individual confidences)
-        aggregate_confidence = (avg_confidence + max_confidence) / 2
-        
-        # Determine severity based on category and confidence
-        severity = self._determine_severity(category, opinions, aggregate_confidence)
-        
-        # Build evidence chain
-        evidence_chain = [
-            {
-                "opinion_id": o.get("id"),
-                "agent": o.get("agent"),
-                "type": o.get("opinion_type"),
-                "confidence": o.get("confidence")
-            }
-            for o in opinions
-        ]
-        
-        # Map category to InsightCategory
-        category_map = {
-            "workflow": InsightCategory.WORKFLOW_ANOMALY,
-            "policy": InsightCategory.COMPLIANCE_VIOLATION,
-            "resource": InsightCategory.RESOURCE_ISSUE,
-            "rca": InsightCategory.OPERATIONAL_WARNING
-        }
-        
-        insight_category = category_map.get(category, InsightCategory.OPERATIONAL_WARNING)
-        
-        # Generate title and summary
-        title, summary = self._generate_insight_text(category, opinions)
-        
-        # Generate recommended actions
-        actions = self._generate_recommended_actions(category, opinions)
-        
-        # Generate explanation
-        explanation = self._generate_explanation(opinions)
-        
-        return Insight(
-            category=insight_category,
-            severity=severity,
-            title=title,
-            summary=summary,
-            confidence=round(aggregate_confidence, 3),
-            contributing_opinions=[o.get("id") for o in opinions],
-            evidence_chain=evidence_chain,
-            recommended_actions=actions,
-            explanation=explanation
-        )
-
-    def _determine_severity(
-        self,
-        category: str,
-        opinions: List[Dict[str, Any]],
-        confidence: float
-    ) -> InsightSeverity:
-        """Determine insight severity based on category and evidence."""
-        # Check for explicit severity in opinions
-        for opinion in opinions:
-            if opinion.get("severity") == "CRITICAL":
-                return InsightSeverity.CRITICAL
-        
-        # Policy violations are generally high severity
-        if category == "policy":
-            return InsightSeverity.HIGH if confidence > 0.7 else InsightSeverity.MEDIUM
-        
-        # Workflow anomalies depend on the specific type
-        if category == "workflow":
-            for opinion in opinions:
-                if "SKIPPED" in opinion.get("opinion_type", ""):
-                    return InsightSeverity.HIGH
-            return InsightSeverity.MEDIUM
-        
-        # Resource issues based on threshold breach
-        if category == "resource":
-            for opinion in opinions:
-                evidence = opinion.get("evidence", {})
-                if evidence.get("overage_percent", 0) > 20:
-                    return InsightSeverity.HIGH
-            return InsightSeverity.MEDIUM
-        
-        return InsightSeverity.MEDIUM if confidence > 0.6 else InsightSeverity.LOW
-
-    def _generate_insight_text(
-        self,
-        category: str,
-        opinions: List[Dict[str, Any]]
-    ) -> tuple:
-        """Generate title and summary for an insight."""
-        titles = {
-            "workflow": "Workflow Integrity Issue Detected",
-            "policy": "Policy Compliance Violation",
-            "resource": "Resource Anomaly Detected",
-            "rca": "Root Cause Analysis Available"
-        }
-        
-        title = titles.get(category, "System Anomaly Detected")
-        
-        # Build summary from opinion explanations
-        explanations = [o.get("explanation", "") for o in opinions if o.get("explanation")]
-        if explanations:
-            summary = " ".join(explanations[:2])  # Take first 2
-        else:
-            summary = f"Multiple {category} anomalies detected requiring attention."
-        
-        return title, summary
-
-    def _generate_recommended_actions(
-        self,
-        category: str,
-        opinions: List[Dict[str, Any]]
-    ) -> List[str]:
-        """Generate recommended actions based on insight category."""
-        actions = {
-            "workflow": [
-                "Review workflow execution logs",
-                "Verify mandatory step enforcement configuration",
-                "Check for unauthorized workflow modifications"
-            ],
-            "policy": [
-                "Investigate policy violation details",
-                "Review access logs for the affected period",
-                "Verify identity and authorization of involved actors"
-            ],
-            "resource": [
-                "Monitor resource trends over next 30 minutes",
-                "Identify processes consuming excessive resources",
-                "Consider scaling or load balancing if pattern persists"
-            ],
-            "rca": [
-                "Review the causal chain analysis",
-                "Investigate the earliest event in the chain",
-                "Correlate with recent system changes"
-            ]
-        }
-        
-        return actions.get(category, ["Investigate further", "Review system logs"])
-
-    def _generate_explanation(
-        self,
-        opinions: List[Dict[str, Any]]
-    ) -> str:
-        """
-        Generate a human-readable explanation.
-        
-        Note: If LLM is available, it's used for natural language generation.
-        LLMs are used for explanation, not detection.
-        """
-        # Build structured explanation from evidence
-        parts = [
-            "This insight was generated by synthesizing opinions from multiple agents.",
-            f"Total contributing opinions: {len(opinions)}.",
-        ]
-        
-        agents = set(o.get("agent", "unknown") for o in opinions)
-        parts.append(f"Agents involved: {', '.join(agents)}.")
-        
-        parts.append(
-            "Each opinion is traceable to specific evidence in the evidence store. "
-            "These represent probable causal relationships, not formal proof."
+        # 4. Run risk forecast (depends on anomalies & policy hits)
+        risk_signals = self._risk_forecast_agent.analyze(
+            anomalies, policy_hits, self._state
         )
         
-        # If LLM available, enhance explanation (placeholder)
-        if self.llm_client:
-            # In production, this would call the LLM for natural language generation
-            pass
+        # 5. Run causal analysis (depends on all previous)
+        causal_links = self._causal_agent.analyze(
+            anomalies, policy_hits, risk_signals, self._state
+        )
         
-        return " ".join(parts)
+        # 6. Generate recommendations (mapped, not invented)
+        recommendations = self._generate_recommendations(
+            anomalies, policy_hits, causal_links
+        )
+        
+        # 7. Complete cycle
+        cycle = self._state.complete_cycle()
+        
+        end_time = datetime.utcnow()
+        duration_ms = (end_time - start_time).total_seconds() * 1000
+        
+        return CycleResult(
+            cycle_id=cycle_id,
+            anomaly_count=len(anomalies),
+            policy_hit_count=len(policy_hits),
+            risk_signal_count=len(risk_signals),
+            causal_link_count=len(causal_links),
+            recommendation_count=len(recommendations),
+            duration_ms=duration_ms
+        )
+    
+    def _generate_recommendations(
+        self,
+        anomalies: List[Anomaly],
+        policy_hits: List[PolicyHit],
+        causal_links: List[CausalLink]
+    ) -> List[Recommendation]:
+        """
+        Generate recommendations based on findings.
+        
+        Solutions are MAPPED, not invented.
+        Never auto-apply.
+        """
+        recommendations = []
+        seen_causes = set()
+        
+        # From anomalies
+        for anomaly in anomalies:
+            if anomaly.type in SOLUTION_MAP and anomaly.type not in seen_causes:
+                solution = SOLUTION_MAP[anomaly.type]
+                rec = self._state.add_recommendation(
+                    cause=anomaly.type,
+                    action=solution["action"],
+                    urgency=solution["urgency"],
+                    rationale=solution["rationale"]
+                )
+                recommendations.append(rec)
+                seen_causes.add(anomaly.type)
+        
+        # From policy hits
+        for hit in policy_hits:
+            if hit.violation_type in SOLUTION_MAP and hit.violation_type not in seen_causes:
+                solution = SOLUTION_MAP[hit.violation_type]
+                rec = self._state.add_recommendation(
+                    cause=f"Policy:{hit.policy_id}",
+                    action=solution["action"],
+                    urgency=solution["urgency"],
+                    rationale=solution["rationale"]
+                )
+                recommendations.append(rec)
+                seen_causes.add(hit.violation_type)
+        
+        # From causal links (address root causes)
+        for link in causal_links:
+            if link.cause in SOLUTION_MAP and link.cause not in seen_causes:
+                solution = SOLUTION_MAP[link.cause]
+                rec = self._state.add_recommendation(
+                    cause=f"Root:{link.cause}",
+                    action=solution["action"],
+                    urgency="HIGH",  # Root causes are high priority
+                    rationale=f"Root cause: {solution['rationale']}"
+                )
+                recommendations.append(rec)
+                seen_causes.add(link.cause)
+        
+        return recommendations
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # QUERY APIs (for external use)
+    # ─────────────────────────────────────────────────────────────────────────────
+    
+    @property
+    def adaptive_baseline_agent(self) -> AdaptiveBaselineAgent:
+        """Expose adaptive baseline agent for API queries."""
+        return self._adaptive_baseline_agent
 
-    def get_insight_evidence(self, insight_id: str) -> Dict[str, Any]:
-        """Retrieve full evidence chain for an insight."""
-        # Query evidence store for related records
-        return self.evidence_store.get_by_insight(insight_id)
+    def get_current_state_summary(self) -> Dict[str, Any]:
+        """Get summary of current state."""
+        return {
+            "cycle": self._state.current_cycle.cycle_id if self._state.current_cycle else None,
+            "anomalies": len(self._state.get_current_anomalies()),
+            "policy_hits": len(self._state.get_current_policy_hits()),
+            "risk_signals": len(self._state.get_current_risk_signals())
+        }

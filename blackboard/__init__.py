@@ -1,8 +1,32 @@
 """
-IICWMS Blackboard Module
-Append-only evidence store implementing the ATRE pillar.
+IICWMS Shared State (Blackboard)
+Makes reasoning inspectable and debuggable.
 """
 
-from .evidence_store import EvidenceStore, get_evidence_store
+from .state import (
+    SharedState,
+    ReasoningCycle,
+    Fact,
+    Anomaly,
+    PolicyHit,
+    RiskSignal,
+    RiskState,
+    Hypothesis,
+    CausalLink,
+    Recommendation,
+    get_shared_state
+)
 
-__all__ = ["EvidenceStore", "get_evidence_store"]
+__all__ = [
+    "SharedState",
+    "ReasoningCycle",
+    "Fact",
+    "Anomaly",
+    "PolicyHit",
+    "RiskSignal",
+    "RiskState",
+    "Hypothesis",
+    "CausalLink",
+    "Recommendation",
+    "get_shared_state"
+]

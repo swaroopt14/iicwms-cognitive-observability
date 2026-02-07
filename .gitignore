@@ -33,6 +33,7 @@ venv/
 *.swp
 *.swo
 *~
+.cursor/
 
 # OS
 .DS_Store
@@ -40,9 +41,16 @@ Thumbs.db
 
 # Node/Frontend
 node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/
+*.local
+
+# Legacy frontend (removed)
 frontend/dashboard/dist/
 frontend/dashboard/.vite/
-*.local
+frontend/dashboard/node_modules/
 
 # Logs
 *.log
