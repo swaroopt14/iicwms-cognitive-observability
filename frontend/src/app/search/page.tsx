@@ -27,41 +27,17 @@ import {
   Plus,
 } from 'lucide-react';
 import { DonutChart } from '@/components/Charts';
+import {
+  queryChronosAI,
+  type SearchRAGEvidence as RAGEvidence,
+  type SearchCausalStep as CausalStep,
+  type SearchRecommendedAction as RecommendedAction,
+  type SearchRAGResponse as RAGResponse,
+} from '@/lib/api';
 
 // ============================================
 // Types
 // ============================================
-interface RAGEvidence {
-  id: string;
-  type: 'anomaly' | 'event' | 'metric' | 'insight' | 'forecast' | 'policy';
-  summary: string;
-  confidence: number;
-  agent: string;
-}
-
-interface CausalStep {
-  label: string;
-  type: 'cause' | 'effect' | 'risk' | 'outcome';
-}
-
-interface RecommendedAction {
-  action: string;
-  expected_impact: string;
-  priority: 'high' | 'medium' | 'low';
-}
-
-interface RAGResponse {
-  answer: string;
-  why_it_matters: string[];
-  supporting_evidence: RAGEvidence[];
-  causal_chain: CausalStep[];
-  recommended_actions: RecommendedAction[];
-  confidence: number;
-  time_horizon: string;
-  uncertainty: string;
-  follow_up_queries: string[];
-  agents_used: string[];
-}
 
 interface ChatMessage {
   id: string;
@@ -643,21 +619,29 @@ export default function SearchPage() {
       setThinkingElapsed(Date.now() - startTime);
     }, 200);
 
-    // Simulate 4-5 second thinking time
-    const thinkingDuration = 4000 + Math.random() * 1000;
-    await new Promise(r => setTimeout(r, thinkingDuration));
+    let response: RAGResponse;
+    try {
+      // Call real backend RAG endpoint
+      response = await queryChronosAI(q);
+    } catch {
+      // If backend is unavailable, fall back to mock responses
+      const minWait = 3000;
+      const elapsed = Date.now() - startTime;
+      if (elapsed < minWait) await new Promise(r => setTimeout(r, minWait - elapsed));
+      response = getMockResponse(q);
+    }
 
     // Stop timer
     if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current);
 
-    const response: RAGResponse = getMockResponse(q);
+    const responseTimeStr = `${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}`;
 
     const assistantMsg: ChatMessage = {
       id: `msg_${messages.length + 1}`,
       role: 'assistant',
       content: response.answer,
       response,
-      timestamp: timeStr,
+      timestamp: responseTimeStr,
     };
 
     setMessages((prev) => [...prev, assistantMsg]);

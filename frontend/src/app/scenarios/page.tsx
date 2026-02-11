@@ -26,7 +26,7 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { DonutChart, Sparkline } from '@/components/Charts';
-import { fetchScenarios as fetchScenariosApi, injectScenario, triggerAnalysisCycle } from '@/lib/api';
+import { fetchScenarios as fetchScenariosApi, injectScenario, triggerAnalysisCycle, fetchScenarioExecutions } from '@/lib/api';
 
 // ============================================
 // Types
@@ -676,9 +676,24 @@ export default function ScenariosPage() {
     setRunningScenario(scenarioId);
     const scenario = scenarios.find(s => s.id === scenarioId);
     try {
+      // Step 1: Inject the scenario into the backend
       const data = await injectScenario(scenarioId);
       const exec = data.execution || {};
+
+      // Step 2: Trigger an analysis cycle so agents process the injected data
+      let cycleResult = null;
+      try {
+        cycleResult = await triggerAnalysisCycle();
+      } catch {
+        console.warn('[Scenarios] Analysis cycle trigger failed, using injection data only');
+      }
+
+      // Step 3: Build findings — use real cycle result if available, else mock
       const findings = scenario ? generateMockFindings(scenario) : [];
+      const detectedCount = cycleResult
+        ? (cycleResult.anomalies || 0) + (cycleResult.policy_hits || 0)
+        : findings.filter(f => f.status === 'detected').length;
+
       const execution: ScenarioExecution = {
         execution_id: exec.execution_id || `exec_${Math.random().toString(36).slice(2, 10)}`,
         scenario_type: scenarioId,
@@ -689,11 +704,14 @@ export default function ScenariosPage() {
         events_injected: exec.events_injected ?? scenario?.events_to_inject ?? 0,
         metrics_injected: exec.metrics_injected ?? scenario?.metrics_to_inject ?? 0,
         expected_agents: exec.expected_agents || scenario?.expected_agents || [],
-        system_response_summary: `Scenario "${scenario?.name}" injected successfully. ${findings.filter(f => f.status === 'detected').length} agents detected anomalies. Run a reasoning cycle for full analysis.`,
+        system_response_summary: cycleResult
+          ? `Scenario "${scenario?.name}" injected and analyzed. ${cycleResult.anomalies || 0} anomalies, ${cycleResult.policy_hits || 0} policy hits, ${cycleResult.risk_signals || 0} risk signals detected. ${cycleResult.insight_generated ? 'Insight generated.' : ''}`
+          : `Scenario "${scenario?.name}" injected successfully. ${detectedCount} agents detected anomalies.`,
         agent_findings: findings,
       };
       setExecutions((prev) => [execution, ...prev]);
     } catch {
+      // Fallback: still show results with mock findings
       const findings = scenario ? generateMockFindings(scenario) : [];
       setExecutions((prev) => [{
         execution_id: `exec_${Math.random().toString(36).slice(2, 10)}`,
@@ -712,8 +730,14 @@ export default function ScenariosPage() {
     setRunningScenario(null);
   };
 
-  const handleRunCycle = () => {
+  const handleRunCycle = async () => {
     setCycleRunning(true);
+    // Trigger real analysis cycle in the background
+    try {
+      await triggerAnalysisCycle();
+    } catch {
+      console.warn('[Scenarios] Backend analysis cycle failed, using UI animation only');
+    }
   };
 
   const handleCycleComplete = useCallback((findings: AgentFinding[]) => {

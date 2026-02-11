@@ -1,236 +1,94 @@
-# IICWMS – Cognitive Observability Platform
+# IICWMS – Chronos AI: Cognitive Observability Platform
 
-### Intelligent IT Compliance & Workflow Monitoring System (PS-08)
+### Intelligent IT Compliance & Workflow Monitoring System | PS-08
 
-> **Moving beyond monitoring into Cognitive Observability** — a multi-agent, reasoning-driven intelligence system that explains *why* things happen, not just *what* happened.
+> **10 Microservices | 9 Reasoning Agents | 40+ API Endpoints | 10 Dashboard Pages**
 
----
-
-## Problem Overview
-
-Modern IT systems operate through complex workflows involving users, services, resources, and policies. As scale increases, traditional monitoring tools fail to provide **understanding** — they surface metrics and alerts but do not explain *why* failures happen or *what actions should be taken*.
-
-This leads to:
-- Silent workflow anomalies going undetected
-- Compliance violations discovered only during audits
-- Resource inefficiencies compounding over time
-- Delayed incident response due to lack of causal reasoning
+> *"If we can't explain why something matters, it doesn't matter."*
 
 ---
 
-## Our Solution: Cognitive Observability
+## Problem
 
-**IICWMS** is a **multi-agent, reasoning-driven intelligence system** that observes simulated IT operations to produce **auditable, traceable, retryable, and explainable insights**.
+IT teams lose **$1.2M/year** to alert fatigue, silent compliance violations, and reactive monitoring. Dashboards show *what* is broken — never *why* it happened or *what to do next*.
 
-Instead of answering *"What is broken?"*, the system answers:
-- **Why did this happen?** — Causal analysis with evidence chains
-- **What is the most probable root cause?** — Temporal correlation + dependency reasoning
-- **What ripple effects does this create?** — Blast radius and downstream impact analysis
-- **What action should be taken next?** — Prioritized, confidence-scored recommendations
+## Solution
 
-### Core Principle
-
-> "If we can't explain why something matters, it doesn't matter."
-
----
-
-## High-Level Architecture
+**Chronos AI** is a **multi-agent cognitive observability system** that observes, reasons, and explains — producing **auditable, traceable, retryable, and explainable insights** with full evidence chains.
 
 ```
-┌─────────────────────────┐
-│   Simulation Engine     │   ← generates realistic IT events
-└───────────┬─────────────┘
-            ↓
-┌─────────────────────────┐
-│   Observation Layer     │   ← raw facts only (events + metrics)
-└───────────┬─────────────┘
-            ↓
-┌──────────────────────────────────────┐
-│   Multi-Agent Reasoning Layer        │
-│                                      │
-│   ┌──────────────┐  ┌─────────────┐ │
-│   │ WorkflowAgent│  │ResourceAgent│ │
-│   └──────────────┘  └─────────────┘ │
-│   ┌──────────────┐  ┌─────────────┐ │
-│   │ComplianceAgent│ │ CausalAgent │ │
-│   └──────────────┘  └─────────────┘ │
-│   ┌──────────────┐  ┌─────────────┐ │
-│   │RiskForecast  │  │ Adaptive    │ │
-│   │Agent         │  │ Baseline    │ │
-│   └──────────────┘  └─────────────┘ │
-│   ┌──────────────┐  ┌─────────────┐ │
-│   │ MasterAgent  │  │ScenarioInj. │ │
-│   └──────────────┘  └─────────────┘ │
-│                                      │
-│   ┌──────────────────────────────┐   │
-│   │  Shared State (Blackboard)   │   │
-│   └──────────────────────────────┘   │
-└───────────┬──────────────────────────┘
-            ↓
-┌──────────────────────────────────────┐
-│   Explanation Engine (LLM-backed)    │   ← human-readable output
-└───────────┬──────────────────────────┘
-            ↓
-┌──────────────────────────────────────┐
-│   Frontend Dashboard (11 pages)      │   ← Next.js cognitive UI
-└──────────────────────────────────────┘
-```
-
-### Key Architectural Principles
-
-1. **Reality is generated, not inferred** — Only the Simulation Engine creates events
-2. **Observe ≠ Reason ≠ Explain** — These are separate layers
-3. **Agents do not talk to each other** — All coordination through shared state (Blackboard)
-4. **LLMs are forbidden for detection** — LLMs ONLY for explanation wording
-5. **Every claim must point to evidence** — If it cannot be traced, it does not exist
-
----
-
-## Multi-Agent System (9 Agents)
-
-| Agent | Purpose | Detects |
-|-------|---------|---------|
-| **WorkflowAgent** | Monitors workflow execution | Delays, missing steps, sequence violations |
-| **ResourceAgent** | Monitors resource conditions | Sustained CPU/memory spikes, network latency |
-| **ComplianceAgent** | Checks policy compliance | Silent violations, after-hours access, policy breaches |
-| **RiskForecastAgent** | Predicts risk trajectory | NORMAL → DEGRADED → AT_RISK → VIOLATION → INCIDENT |
-| **CausalAgent** | Identifies cause-effect chains | Temporal correlations + dependency-based reasoning |
-| **AdaptiveBaselineAgent** | Learns normal behavior | Drift detection before static thresholds trigger |
-| **MasterAgent** | Coordinates reasoning cycles | Triggers agents, ranks severity, produces insights |
-| **ScenarioInjectionAgent** | Stress testing | Injects disruption scenarios for agent evaluation |
-| **QueryAgent (RAG)** | Answers questions | Agentic RAG over blackboard state |
-
----
-
-## Shared State (Blackboard)
-
-Agents communicate through a shared, immutable blackboard ledger:
-
-```json
-{
-  "cycle_id": "cycle_104",
-  "facts": ["...observed events and metrics..."],
-  "anomalies": ["...agent-detected anomalies with confidence..."],
-  "policy_hits": ["...compliance violations with evidence..."],
-  "risk_signals": ["...risk state transitions..."],
-  "hypotheses": ["...probable causes ranked by confidence..."],
-  "causal_links": ["...cause → effect with statistical basis..."],
-  "recommendations": ["...prioritized actions with expected impact..."]
-}
+═══════════════════════════════════════════════════════════════════════════════
+ OBSERVE (raw facts) → REASON (9 agents) → EXPLAIN (evidence-backed insights)
+═══════════════════════════════════════════════════════════════════════════════
 ```
 
 ---
 
-## Frontend Dashboard (11 Pages)
+## Service Architecture
 
-The frontend is a modern Next.js application providing cognitive observability across 11 specialized views:
-
-| Page | Description |
-|------|-------------|
-| **Overview** | System health, stats, cost trends, anomaly rates, critical insights |
-| **Workflow Timeline** | Interactive confidence-tracked event timeline with lane visualization |
-| **Anomaly Center** | All detected anomalies with evidence chain drill-down |
-| **Causal Analysis** | Interactive graph of cause-effect relationships with snapshot export |
-| **Compliance** | Policy monitoring, violation tracking, audit readiness scoring |
-| **Insight Feed** | Executive-level AI-generated insights with recommended actions |
-| **Resource & Cost** | Resource utilization, cost trends, predictive cost analysis |
-| **System Risk Graph** | Stock-market-style risk trajectory with agent contribution breakdown |
-| **Scenarios** | Stress testing with real-time agent response visualization |
-| **Chronos AI (Search)** | Agentic RAG — ask questions, get evidence-backed answers |
-| **System Graph** | Risk index with component comparison and contribution analysis |
-
-### Frontend Features
-- Real-time data with React Query
-- Custom canvas-rendered charts (no chart library dependency)
-- Evidence chain drill-down from any anomaly/insight
-- Cross-page navigation (Jump to Graph, View Causal Analysis, etc.)
-- Scenario injection with live agent-by-agent response animation
-- Chronos AI with multi-stage thinking visualization (4-5s reasoning)
-- Extract Snapshot — export causal analysis state as JSON
-- Fully responsive modern UI with dark accents
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    chronos-dashboard (frontend/)                        │
+│            Next.js 16 │ React 19 │ Tailwind CSS 4 │ :3000             │
+│     10 Pages: Overview │ Workflows │ Resources │ Compliance            │
+│              Anomalies │ Causal │ Insights │ Ask AI │ Scenarios │ Risk │
+└──────────────────────────────┬──────────────────────────────────────────┘
+                               │ REST API (JSON)
+┌──────────────────────────────┴──────────────────────────────────────────┐
+│                    chronos-gateway (api/)                               │
+│              FastAPI │ Uvicorn │ 40+ endpoints │ :8000                  │
+└───┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬────────────────────┘
+    │      │      │      │      │      │      │      │
+    ▼      ▼      ▼      ▼      ▼      ▼      ▼      ▼
+┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐┌──────┐
+│simul-││obser-││reaso-││black-││expla-││risk- ││rag   ││graph │
+│ator  ││ver   ││ning  ││board ││iner  ││engine││      ││      │
+│      ││      ││(9 ag)││      ││      ││      ││      ││(Neo4j│
+└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘└──────┘
+ SVC 1   SVC 2   SVC 3   SVC 4   SVC 5   SVC 6  SVC 7   SVC 8
+```
 
 ---
 
-## Explainability & ATRE Principles
+## Service Registry
 
-Every insight produced by the system is:
+| # | Service | Directory | Technology | Description |
+|---|---------|-----------|------------|-------------|
+| 1 | **chronos-simulator** | `simulator/` | Python 3.10 | Probabilistic event/metric generation with emergent behavior |
+| 2 | **chronos-observer** | `observation/` | Python 3.10 + JSONL | Append-only raw fact ingestion & windowed queries |
+| 3 | **chronos-reasoning** | `agents/` | Python 3.10 (9 agents) | Multi-agent detection, compliance, risk, causal analysis |
+| 4 | **chronos-blackboard** | `blackboard/` | Python 3.10 + JSONL | Shared reasoning state — inter-agent communication hub |
+| 5 | **chronos-explainer** | `explanation/` | Python 3.10 + Gemini | 3-tier insight generation (Template → LLM → CrewAI) |
+| 6 | **chronos-risk-engine** | `metrics/` | Python 3.10 | Composite risk index (0-100) with weighted scoring |
+| 7 | **chronos-rag** | `rag/` | Python 3.10 | Reasoning-augmented query engine (7 query types) |
+| 8 | **chronos-graph** | `graph/` | Python 3.10 + Neo4j | Graph database for causal knowledge (Round-2) |
+| 9 | **chronos-gateway** | `api/` | FastAPI + Uvicorn | REST API gateway — 40+ endpoints, 12 route groups |
+| 10 | **chronos-dashboard** | `frontend/` | Next.js 16 + React 19 | 10-page cognitive observability frontend |
 
-- **Auditable** — backed by immutable evidence entries in the blackboard
-- **Traceable** — linked to specific event IDs, metric readings, and agent reasoning
-- **Retryable** — agents are stateless and re-runnable on the same data
-- **Explainable** — insights cite evidence chains, not intuition
-
-**LLMs are used ONLY for narrative explanation, never for detection or enforcement.**
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|------------|
-| Backend | Python 3.10+, FastAPI, Pydantic v2, Uvicorn |
-| Simulation | Custom engine with emergent behavior patterns |
-| Agents | 9 stateless Python agent modules |
-| Blackboard | In-memory shared state with JSONL persistence |
-| AI/LLM | Google Gemini (explanation only), CrewAI orchestration |
-| RAG | Custom query engine over blackboard state |
-| Frontend | Next.js 16, React 19, TypeScript, TailwindCSS 4 |
-| Charts | Custom HTML Canvas rendering (zero chart library deps) |
-| Data Fetching | TanStack React Query with auto-refresh |
+> See [`SERVICES.md`](SERVICES.md) for full service architecture with data flow diagrams.
 
 ---
 
-## Running the System
+## Multi-Agent Reasoning (9 Agents)
 
-### Prerequisites
+| Agent | Type | Detects / Does |
+|-------|------|----------------|
+| **WorkflowAgent** | Detection | Delays, missing steps, sequence violations |
+| **ResourceAgent** | Detection | Sustained CPU/memory spikes, network drift |
+| **ComplianceAgent** | Detection | Silent policy violations (5 policies) |
+| **AdaptiveBaselineAgent** | Detection | Sigma deviations from learned normal |
+| **RiskForecastAgent** | Prediction | NORMAL → DEGRADED → AT_RISK → VIOLATION → INCIDENT |
+| **CausalAgent** | Reasoning | Cause-effect chains with confidence scores |
+| **MasterAgent** | Coordinator | Orchestrates cycles, ranks severity, maps actions |
+| **QueryAgent** | Interface | Agentic RAG — answers natural language questions |
+| **ScenarioInjectionAgent** | Testing | Injects 5 stress scenarios for demos |
 
-- Python 3.10+
-- Node.js 18+
-- npm
+**Coordination:** Agents never communicate directly. All via Blackboard (SharedState).
 
-### Backend
-
-```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # macOS/Linux
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# Run API server
-uvicorn api.server:app --reload --port 8000
 ```
-
-### Frontend
-
-```bash
-cd frontend
-npm install
-npm run dev          # Development (port 3000)
-
-# OR for production build:
-npm run build
-npx next start -p 3000
-```
-
-### Seed Demo Data (Optional)
-
-```bash
-# With backend running, seed rich data for all pages
-python scripts/seed_demo_data.py
-```
-
-### Environment Variables
-
-```bash
-GOOGLE_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini/gemini-2.0-flash
-ENABLE_CREWAI=true
+Phase 1 (Parallel):   Workflow + Resource + Compliance + Baseline
+Phase 2 (Sequential): Risk Forecast → Causal Analysis
+Phase 3:              Recommendations + Explanations
 ```
 
 ---
@@ -239,62 +97,243 @@ ENABLE_CREWAI=true
 
 ```
 iicwms-cognitive-observability/
-├── agents/                    # 9 AI agents (stateless modules)
-│   ├── workflow_agent.py
-│   ├── resource_agent.py
-│   ├── compliance_agent.py
-│   ├── causal_agent.py
-│   ├── risk_forecast_agent.py
-│   ├── adaptive_baseline_agent.py
-│   ├── master_agent.py
-│   ├── scenario_injection_agent.py
-│   └── query_agent.py
-├── api/                       # FastAPI server + endpoints
-│   └── server.py
-├── blackboard/                # Shared state management
-│   └── state.py
-├── explanation/               # LLM-backed explanation engine
-│   ├── engine.py
-│   └── crew.py
-├── frontend/                  # Next.js dashboard (11 pages)
-│   └── src/
-│       ├── app/               # Page routes
-│       ├── components/        # Shared UI components
-│       └── lib/               # API client, mock data, utils
-├── metrics/                   # Risk index calculation
-├── observation/               # Observation layer (facts only)
-├── rag/                       # RAG query engine
-├── scripts/                   # Utility scripts
-├── simulator/                 # Simulation engine
-├── docs/                      # Architecture documentation
-├── requirements.txt
-└── README.md
+│
+├── .env.example                         # Environment config (Gemini, CrewAI, ports)
+├── .gitignore
+├── LICENSE
+├── README.md                            # This file
+├── SERVICES.md                          # Full service architecture manifest
+├── requirements.txt                     # Python 3.10+ dependencies
+├── guards.py                            # Runtime architectural boundary enforcement
+│
+├── docs/                                # Documentation & judge-facing materials
+│   ├── IICWMS_End_To_End_Document.md    #   End-to-end system document (for judges)
+│   ├── architecture.md                  #   System architecture & data model
+│   ├── agent_responsibilities.md        #   Agent I/O contracts & boundaries
+│   ├── assumptions.md                   #   Explicit assumptions & limitations
+│   └── demo_flow.md                     #   Demo script & talking points
+│
+├── scripts/                             # Operational scripts
+│   └── seed_demo_data.py                #   Per-page demo data generator
+│
+│  ─── BACKEND SERVICES ─────────────────────────────────────────────────
+│
+├── simulator/                           # SVC 1: chronos-simulator
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: SimulationEngine
+│   └── engine.py                        #   Probabilistic simulation engine
+│
+├── observation/                         # SVC 2: chronos-observer
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: ObservationLayer
+│   └── layer.py                        #   Append-only event/metric store
+│
+├── agents/                              # SVC 3: chronos-reasoning (9 agents)
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Agent registry & exports
+│   ├── master_agent.py                  #   Coordinator — orchestrates cycles
+│   ├── workflow_agent.py                #   Detection — workflow anomalies
+│   ├── resource_agent.py                #   Detection — resource spikes & drift
+│   ├── compliance_agent.py              #   Detection — 5 policy violations
+│   ├── adaptive_baseline_agent.py       #   Detection — learned baseline deviations
+│   ├── risk_forecast_agent.py           #   Prediction — risk trajectory
+│   ├── causal_agent.py                  #   Reasoning — cause-effect chains
+│   ├── query_agent.py                   #   Interface — agentic RAG
+│   ├── query_crew.py                    #   CrewAI — optional LLM pipeline
+│   └── scenario_injection_agent.py      #   Testing — 5 stress scenarios
+│
+├── blackboard/                          # SVC 4: chronos-blackboard
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: SharedState, data models
+│   └── state.py                         #   Cycle-based shared reasoning state
+│
+├── explanation/                         # SVC 5: chronos-explainer
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: ExplanationEngine
+│   ├── engine.py                        #   3-tier pipeline (Template→LLM→CrewAI)
+│   └── crew.py                          #   CrewAI crew definition
+│
+├── metrics/                             # SVC 6: chronos-risk-engine
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: RiskIndexTracker
+│   └── risk_index.py                    #   Composite risk score (0-100)
+│
+├── rag/                                 # SVC 7: chronos-rag
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: AgenticRAGEngine
+│   └── query_engine.py                  #   Query decomposition → synthesis
+│
+├── graph/                               # SVC 8: chronos-graph (Round-2)
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: Neo4jClient
+│   ├── neo4j_client.py                  #   Neo4j connection & operations
+│   ├── schema.cypher                    #   Graph schema definition
+│   └── queries.cypher                   #   Pre-built Cypher queries
+│
+├── api/                                 # SVC 9: chronos-gateway
+│   ├── README.md                        #   Service documentation
+│   ├── __init__.py                      #   Exports: app
+│   └── server.py                        #   FastAPI — 40+ endpoints
+│
+│  ─── FRONTEND SERVICE ─────────────────────────────────────────────────
+│
+└── frontend/                            # SVC 10: chronos-dashboard
+    ├── README.md                        #   Service documentation
+    ├── package.json                     #   React 19, Tailwind 4, TanStack Query
+    ├── next.config.ts                   #   Next.js 16 configuration
+    ├── tsconfig.json                    #   TypeScript 5 strict mode
+    ├── postcss.config.mjs               #   PostCSS + Tailwind pipeline
+    ├── eslint.config.mjs                #   ESLint 9 rules
+    ├── public/                          #   Static assets
+    └── src/
+        ├── components/                  #   Sidebar, Header, Charts, Providers
+        │   └── Charts.tsx               #   Custom canvas charts (zero deps)
+        └── app/                         #   Next.js App Router — 10 pages
+            ├── overview/                #   System health dashboard
+            ├── workflow-map/            #   Workflow execution timeline
+            ├── resource-cost/           #   Resource & cost intelligence
+            ├── compliance/              #   Compliance intelligence
+            ├── anomaly-center/          #   Anomaly detection hub
+            ├── causal-analysis/         #   Causal reasoning visualization
+            ├── insight-feed/            #   Executive intelligence feed
+            ├── search/                  #   Ask Chronos AI (agentic RAG)
+            ├── scenarios/               #   Scenario lab (stress testing)
+            └── system-graph/            #   System risk index
 ```
+
+---
+
+## Quick Start
+
+### Backend (Services 1-9)
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your Gemini API key (optional — system works without it)
+
+# Start API server
+uvicorn api.server:app --reload --port 8000
+```
+
+### Frontend (Service 10)
+
+```bash
+cd frontend
+npm install
+npm run dev          # Development → http://localhost:3000
+```
+
+### Seed Demo Data
+
+```bash
+# With backend running — seeds all 10 frontend pages
+python3 scripts/seed_demo_data.py
+```
+
+### Environment Variables
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `GEMINI_API_KEY` | No | — | LLM for explanation engine (optional) |
+| `ENABLE_CREWAI` | No | `false` | CrewAI multi-agent explanations |
+| `API_HOST` | No | `0.0.0.0` | Server bind address |
+| `API_PORT` | No | `8000` | Server port |
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| **Languages** | Python 3.10+, TypeScript 5 |
+| **Backend** | FastAPI, Uvicorn, Pydantic v2 |
+| **Frontend** | Next.js 16, React 19, Tailwind CSS 4, TanStack React Query v5 |
+| **AI/LLM** | Google Gemini (explanation only), CrewAI (optional) |
+| **Agents** | 9 stateless Python modules with Blackboard coordination |
+| **Storage** | In-memory state + JSONL persistence |
+| **Charts** | Custom HTML Canvas rendering (zero chart library deps) |
+| **Data Fetching** | Axios (frontend), httpx (backend) |
+| **Guards** | Runtime architectural enforcement via Python decorators |
+| **Graph DB** | Neo4j + Cypher (Round-2) |
+
+---
+
+## ATRE Principles
+
+Every insight is:
+
+- **Auditable** — Immutable blackboard cycles with JSONL persistence
+- **Traceable** — Every claim links to specific event IDs and metric readings
+- **Retryable** — Agents are stateless — same input produces same output
+- **Explainable** — Full reasoning chain from observation to insight
+
+---
+
+## Architectural Guards (Runtime Enforcement)
+
+| Guard | Prevents |
+|-------|----------|
+| `@agents_cannot_emit_events` | Agents creating events (only simulation can) |
+| `@llm_cannot_write_state` | LLM modifying shared state |
+| `@simulation_cannot_read_policies` | Simulation knowing about policies |
+| `validate_insight_has_evidence()` | Insights without evidence chains |
+| `validate_anomaly_has_evidence()` | Anomalies without event references |
 
 ---
 
 ## Success Criteria (All Achieved)
 
-- [x] Workflow degradation detected and explained
-- [x] Silent compliance violations identified with evidence
+- [x] Workflow degradation detected and explained with evidence
+- [x] Silent compliance violations identified before audit
 - [x] Risk predicted BEFORE violation occurs
-- [x] Root cause explained with causal chains
-- [x] Preventive actions suggested with confidence scores
-- [x] 9 agents working through shared blackboard
-- [x] 11-page frontend with real-time data visualization
+- [x] Root cause explained with causal chains and confidence
+- [x] Preventive actions suggested with urgency levels
+- [x] 9 agents coordinated through shared blackboard
+- [x] 10-page frontend with real-time cognitive visualization
 - [x] Agentic RAG for natural language system queries
 - [x] Scenario injection with live agent response tracking
 - [x] Full evidence traceability across all insights
 
 ---
 
-## Design Principles (Failure Modes Avoided)
+## Codebase Metrics
 
-- **No "LLM detected anomaly"** — Detection is rule-based and statistical
-- **No scripted demo data** — Simulation engine generates emergent behavior
-- **No agents calling each other** — All coordination via shared blackboard
-- **No auto-fixing systems** — Recommendations only, humans decide
-- **No dashboards without reasoning** — Every metric has an explanation
+| Metric | Count |
+|--------|-------|
+| Total services | 10 |
+| Total files | ~74 |
+| Python modules | 30+ |
+| TypeScript modules | 16 |
+| REST API endpoints | 40+ |
+| Specialized agents | 9 |
+| Frontend pages | 10 |
+| Chart components | 6 (custom, zero deps) |
+| Policy rules | 5 |
+| Injection scenarios | 5 |
+| Causal patterns | 5 |
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [`SERVICES.md`](SERVICES.md) | Full service architecture, data flow, guard registry |
+| [`docs/IICWMS_End_To_End_Document.md`](docs/IICWMS_End_To_End_Document.md) | Comprehensive end-to-end system document (for judges) |
+| [`docs/architecture.md`](docs/architecture.md) | System architecture & data model specification |
+| [`docs/agent_responsibilities.md`](docs/agent_responsibilities.md) | Agent I/O contracts & boundaries |
+| [`docs/assumptions.md`](docs/assumptions.md) | Explicit assumptions & limitations |
+| [`docs/demo_flow.md`](docs/demo_flow.md) | Demo script & talking points |
+
+Each service directory also contains its own `README.md` with interface contracts, configuration, and technology details.
 
 ---
 
