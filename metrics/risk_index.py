@@ -70,11 +70,21 @@ class RiskIndexTracker:
     - Workflow risk
     - Resource stress
     - Compliance proximity
+    
+    Persistence: SQLite (risk_history table). Survives restarts.
     """
     
     def __init__(self, max_history: int = 100):
         self._history: deque[RiskDataPoint] = deque(maxlen=max_history)
         self._base_risk = 20.0  # Baseline risk (never 0 in real systems)
+        self._db = None
+    
+    def _get_db(self):
+        """Lazy-init SQLite store."""
+        if self._db is None:
+            from db import get_sqlite_store
+            self._db = get_sqlite_store()
+        return self._db
     
     def record_cycle(self, cycle: ReasoningCycle) -> RiskDataPoint:
         """
@@ -116,6 +126,22 @@ class RiskIndexTracker:
         )
         
         self._history.append(data_point)
+        
+        # Persist to SQLite
+        try:
+            self._get_db().insert_risk_point(
+                cycle_id=data_point.cycle_id,
+                timestamp=data_point.timestamp,
+                risk_score=data_point.risk_score,
+                workflow_risk=data_point.workflow_risk,
+                resource_risk=data_point.resource_risk,
+                compliance_risk=data_point.compliance_risk,
+                risk_state=data_point.risk_state,
+                contributions=[asdict(c) for c in data_point.contributions],
+            )
+        except Exception:
+            pass  # SQLite failure should not break risk tracking
+        
         return data_point
     
     def _calculate_workflow_risk(

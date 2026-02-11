@@ -1,20 +1,31 @@
 """
-IICWMS API Server
-=================
-FastAPI application exposing the reasoning system.
+Chronos AI — IICWMS Production API Server
+==========================================
+Production-grade FastAPI backend with:
+- Structured logging with request correlation
+- Request ID tracing (X-Request-ID)
+- Response timing (X-Response-Time)
+- OWASP security headers
+- Rate limiting (per-IP sliding window)
+- Graceful shutdown with task cancellation
+- Global error handling (no raw stack traces)
+- Environment-based configuration
 
-ARCHITECTURE LAYER: Interface
-Exposes observation ingestion and insight retrieval.
+ARCHITECTURE LAYER: Interface Gateway
+Exposes observation ingestion, reasoning state, and insight retrieval.
 """
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from contextlib import asynccontextmanager
 import asyncio
+import logging
+import sys
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from simulator.engine import SimulationEngine, Event, ResourceMetric
 from observation import ObservationLayer, get_observation_layer
@@ -25,6 +36,45 @@ from guards import run_all_guards_check, SimulationContext
 from rag import get_rag_engine
 from metrics import get_risk_tracker
 
+from api.config import settings
+from api.middleware import (
+    RequestIDMiddleware,
+    TimingMiddleware,
+    SecurityHeadersMiddleware,
+    ErrorHandlerMiddleware,
+    RateLimitMiddleware,
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRUCTURED LOGGING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _setup_logging():
+    """Configure structured logging for the application."""
+    log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-7s | %(name)-24s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+
+    # Root logger
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.handlers.clear()
+    root.addHandler(handler)
+
+    # Silence noisy third-party loggers
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+_setup_logging()
+logger = logging.getLogger("chronos.api")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PYDANTIC MODELS (API Contracts)
@@ -32,21 +82,21 @@ from metrics import get_risk_tracker
 
 class EventInput(BaseModel):
     """Input for event ingestion."""
-    event_id: str
-    type: str
-    workflow_id: Optional[str] = None
-    actor: str
-    resource: Optional[str] = None
-    timestamp: str
-    metadata: Dict[str, Any] = {}
+    event_id: str = Field(..., min_length=1, max_length=128, description="Unique event identifier")
+    type: str = Field(..., min_length=1, max_length=64, description="Event type")
+    workflow_id: Optional[str] = Field(None, max_length=128)
+    actor: str = Field(..., min_length=1, max_length=128)
+    resource: Optional[str] = Field(None, max_length=128)
+    timestamp: str = Field(..., description="ISO 8601 timestamp")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class MetricInput(BaseModel):
     """Input for metric ingestion."""
-    resource_id: str
-    metric: str
-    value: float
-    timestamp: str
+    resource_id: str = Field(..., min_length=1, max_length=128)
+    metric: str = Field(..., min_length=1, max_length=64)
+    value: float = Field(..., description="Metric value")
+    timestamp: str = Field(..., description="ISO 8601 timestamp")
 
 
 class SystemHealth(BaseModel):
@@ -131,7 +181,7 @@ class CausalLinkResponse(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GLOBAL STATE
+# GLOBAL STATE — Application-scoped singletons
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _simulation: Optional[SimulationEngine] = None
@@ -142,139 +192,294 @@ _explanation: Optional[ExplanationEngine] = None
 _insights: List[Insight] = []
 _cycle_results: List[CycleResult] = []
 _running = False
+_reasoning_task: Optional[asyncio.Task] = None
+_startup_time: Optional[datetime] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LIFECYCLE
+# REASONING LOOP — Background task with error resilience
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def run_reasoning_loop():
-    """Background task: Run simulation and reasoning cycles."""
-    global _running, _insights
-    
+    """
+    Background task: Run simulation → observation → reasoning cycles.
+
+    Production hardening:
+    - Catches and logs individual cycle failures without stopping the loop
+    - Respects cancellation for graceful shutdown
+    - Bounds insight buffer to prevent memory growth
+    - Bounds cycle result history
+    """
+    global _running, _insights, _cycle_results
+    cycle_logger = logging.getLogger("chronos.reasoning_loop")
+
+    cycle_logger.info(
+        f"Reasoning loop started (interval={settings.CYCLE_INTERVAL_SECONDS}s)"
+    )
+
     while _running:
         try:
-            # 1. Simulation tick - generates events (with guard context)
+            # 1. Simulation tick — generate events (guard-scoped)
             with SimulationContext():
                 events, metrics = _simulation.tick()
-            
-            # 2. Observation layer ingests (outside simulation context)
+
+            # 2. Observation layer ingest
             for event in events:
                 _observation.observe_event(event.to_dict())
             for metric in metrics:
                 _observation.observe_metric(metric.to_dict())
-            
-            # 3. Master agent runs reasoning cycle
+
+            # 3. MCP runs reasoning cycle
             result = _master.run_cycle()
             _cycle_results.append(result)
-            
-            # 4. Track risk index (for stock-style graph)
+
+            # Bound cycle results to prevent unbounded growth
+            if len(_cycle_results) > settings.MAX_CYCLE_HISTORY:
+                _cycle_results = _cycle_results[-settings.MAX_CYCLE_HISTORY:]
+
+            # 4. Track risk index
             if _state._completed_cycles:
                 latest_cycle = _state._completed_cycles[-1]
                 risk_tracker = get_risk_tracker()
                 risk_tracker.record_cycle(latest_cycle)
-                
+
                 # 5. Explanation engine generates insight
                 insight = _explanation.generate_insight(latest_cycle)
                 if insight:
                     _insights.append(insight)
-                    # Keep only recent insights
-                    if len(_insights) > 50:
-                        _insights = _insights[-50:]
-            
-            # Wait before next cycle
-            await asyncio.sleep(5)
-            
-        except Exception as e:
-            print(f"Reasoning loop error: {e}")
-            await asyncio.sleep(5)
+                    if len(_insights) > settings.MAX_INSIGHTS_BUFFER:
+                        _insights = _insights[-settings.MAX_INSIGHTS_BUFFER:]
+                    
+                    # Persist insight to SQLite
+                    try:
+                        from db import get_sqlite_store
+                        get_sqlite_store().insert_insight(
+                            insight_id=insight.insight_id,
+                            cycle_id=insight.cycle_id,
+                            summary=insight.summary,
+                            severity=insight.severity,
+                            confidence=insight.confidence,
+                            timestamp=insight.timestamp.isoformat(),
+                            why_it_matters=insight.why_it_matters,
+                            what_will_happen=insight.what_will_happen_if_ignored,
+                            uncertainty=insight.uncertainty,
+                            evidence_count=insight.evidence_count,
+                            actions=insight.recommended_actions,
+                        )
+                    except Exception:
+                        pass
 
+            cycle_logger.debug(
+                f"Cycle {result.cycle_id}: "
+                f"{result.anomaly_count} anomalies, "
+                f"{result.policy_hit_count} violations, "
+                f"{result.duration_ms:.0f}ms"
+            )
+
+            # Wait before next cycle (respects cancellation)
+            await asyncio.sleep(settings.CYCLE_INTERVAL_SECONDS)
+
+        except asyncio.CancelledError:
+            cycle_logger.info("Reasoning loop cancelled — shutting down gracefully")
+            break
+        except Exception as e:
+            cycle_logger.error(f"Cycle error (will retry): {type(e).__name__}: {e}")
+            await asyncio.sleep(settings.CYCLE_INTERVAL_SECONDS)
+
+    cycle_logger.info("Reasoning loop stopped")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIFECYCLE — Startup / Shutdown with graceful task management
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    global _simulation, _observation, _state, _master, _explanation, _running
-    
-    # Run architectural guards check
-    print("\n" + "="*60)
-    print("IICWMS - Cognitive Observability Platform")
-    print("="*60)
+    """
+    Application lifespan manager.
+
+    Startup:
+    1. Run architectural guards
+    2. Initialize all components
+    3. Start background reasoning loop
+
+    Shutdown:
+    1. Signal reasoning loop to stop
+    2. Cancel background task
+    3. Wait for clean exit
+    """
+    global _simulation, _observation, _state, _master, _explanation
+    global _running, _reasoning_task, _startup_time
+
+    _startup_time = datetime.utcnow()
+
+    # ── Architectural Guards ──
+    logger.info("=" * 60)
+    logger.info(f"{settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"Environment: {settings.ENVIRONMENT}")
+    logger.info("=" * 60)
+
     try:
         run_all_guards_check()
+        logger.info("Architectural guards: PASS")
     except Exception as e:
-        print(f"WARNING: Guard check issue: {e}")
-    
-    # Initialize components
-    print("\nInitializing components...")
+        logger.warning(f"Architectural guards: WARNING — {e}")
+
+    # ── Component Initialization ──
+    logger.info("Initializing components...")
     _simulation = SimulationEngine()
     _observation = get_observation_layer()
     _state = get_shared_state()
     _master = MasterAgent(_observation, _state)
-    _explanation = ExplanationEngine(use_llm=False)  # Deterministic by default
-    
-    print("✓ Simulation Engine ready")
-    print("✓ Observation Layer ready")
-    print("✓ Shared State (Blackboard) ready")
-    print("✓ Multi-Agent System ready")
-    print("✓ Explanation Engine ready")
-    
-    # Start reasoning loop
+    _explanation = ExplanationEngine(use_llm=settings.ENABLE_CREWAI)
+
+    logger.info("  Simulation Engine ......... ready")
+    logger.info("  Observation Layer ......... ready")
+    logger.info("  Shared State (Blackboard) . ready")
+    logger.info("  MCP (Master Agent) ........ ready")
+    logger.info("  Explanation Engine ........ ready")
+
+    # ── Database Initialization ──
+    from db import get_sqlite_store
+    from graph import get_neo4j_client
+    _sqlite = get_sqlite_store()
+    logger.info(f"  SQLite Store .............. ready ({settings.SQLITE_DB_PATH})")
+    _neo4j = get_neo4j_client()
+    if _neo4j.is_connected:
+        logger.info(f"  Neo4j Aura ................ connected ({settings.NEO4J_URI})")
+    else:
+        logger.info("  Neo4j Aura ................ disabled (using NullGraphClient)")
+
+    # ── Start Reasoning Loop ──
     _running = True
-    asyncio.create_task(run_reasoning_loop())
-    print("\n✓ Reasoning loop started (5s interval)")
-    print("="*60 + "\n")
-    
+    _reasoning_task = asyncio.create_task(run_reasoning_loop())
+    logger.info(f"Reasoning loop started ({settings.CYCLE_INTERVAL_SECONDS}s interval)")
+    logger.info("=" * 60)
+    logger.info("Server ready — accepting requests")
+
     yield
-    
-    # Cleanup
+
+    # ── Graceful Shutdown ──
+    logger.info("Initiating graceful shutdown...")
     _running = False
-    print("\nIICWMS shutdown complete.")
+
+    if _reasoning_task and not _reasoning_task.done():
+        _reasoning_task.cancel()
+        try:
+            await asyncio.wait_for(_reasoning_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    logger.info(f"Shutdown complete. Ran {len(_cycle_results)} cycles.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# APP SETUP
+# APP SETUP — Production-grade FastAPI with middleware stack
 # ═══════════════════════════════════════════════════════════════════════════════
 
 app = FastAPI(
-    title="IICWMS API",
-    description="Intelligent IT Compliance & Workflow Monitoring System",
-    version="1.0.0",
-    lifespan=lifespan
+    title="Chronos AI — IICWMS API",
+    description=(
+        "Intelligent IT Compliance & Workflow Monitoring System.\n\n"
+        "**Multi-Agent Cognitive Observability Platform**\n\n"
+        "9 specialized agents analyze IT operations in real-time:\n"
+        "- Workflow anomaly detection\n"
+        "- Resource usage analysis\n"
+        "- Compliance policy evaluation\n"
+        "- Risk forecasting\n"
+        "- Causal reasoning\n"
+        "- Adaptive baseline learning\n\n"
+        "Every response includes `X-Request-ID` and `X-Response-Time` headers."
+    ),
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
+# ── Middleware Stack (order matters — outermost first) ──
+# Error handler wraps everything
+app.add_middleware(ErrorHandlerMiddleware)
+# Security headers on every response
+app.add_middleware(SecurityHeadersMiddleware)
+# Request timing + logging
+app.add_middleware(TimingMiddleware)
+# Request ID tracing
+app.add_middleware(RequestIDMiddleware)
+# Rate limiting
+app.add_middleware(
+    RateLimitMiddleware,
+    max_requests=settings.RATE_LIMIT_REQUESTS,
+    window_seconds=settings.RATE_LIMIT_WINDOW_SECONDS,
+)
+# CORS (must be last middleware added = first to run)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=settings.CORS_ALLOW_METHODS,
+    allow_headers=settings.CORS_ALLOW_HEADERS,
+    expose_headers=["X-Request-ID", "X-Response-Time"],
 )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GLOBAL EXCEPTION HANDLERS — Structured error responses
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Return structured JSON for all HTTP errors."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail if isinstance(exc.detail, str) else "error",
+            "status_code": exc.status_code,
+            "request_id": request_id,
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """Catch-all for unhandled exceptions — never leak stack traces."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.error(f"[{request_id}] Unhandled: {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_server_error",
+            "message": "An unexpected error occurred.",
+            "request_id": request_id,
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OBSERVATION ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.post("/observe/event")
+@app.post("/observe/event", tags=["Observation"])
 async def observe_event(event: EventInput):
-    """Ingest a raw event."""
+    """Ingest a raw event into the observation layer."""
     observed = _observation.observe_event(event.model_dump())
     return {"status": "observed", "event_id": observed.event_id}
 
 
-@app.post("/observe/metric")
+@app.post("/observe/metric", tags=["Observation"])
 async def observe_metric(metric: MetricInput):
-    """Ingest a raw metric."""
+    """Ingest a raw metric into the observation layer."""
     observed = _observation.observe_metric(metric.model_dump())
     return {"status": "observed", "resource_id": observed.resource_id}
 
 
-@app.get("/observe/window")
+@app.get("/observe/window", tags=["Observation"])
 async def get_observation_window(
-    limit: int = 100,
-    event_type: Optional[str] = None
+    limit: int = Query(default=100, ge=1, le=1000, description="Max events to return"),
+    event_type: Optional[str] = Query(default=None, description="Filter by event type"),
 ):
-    """Get recent observations."""
+    """Get recent observations with optional filtering."""
     events = _observation.get_recent_events(count=limit)
     return {
         "events": [
@@ -297,9 +502,9 @@ async def get_observation_window(
 # SYSTEM HEALTH ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/system/health", response_model=SystemHealth)
+@app.get("/system/health", response_model=SystemHealth, tags=["System"])
 async def get_system_health():
-    """Get overall system health."""
+    """Get overall system health — operational status based on current reasoning cycle."""
     anomalies = _state.get_current_anomalies() if _state.current_cycle else []
     violations = _state.get_current_policy_hits() if _state.current_cycle else []
     risks = _state.get_current_risk_signals() if _state.current_cycle else []
@@ -328,9 +533,9 @@ async def get_system_health():
     )
 
 
-@app.get("/signals/summary", response_model=SignalsSummary)
+@app.get("/signals/summary", response_model=SignalsSummary, tags=["System"])
 async def get_signals_summary():
-    """Get cognitive signals summary."""
+    """Get cognitive signals summary — workflow, policy, and resource health at a glance."""
     anomalies = _state.get_current_anomalies() if _state.current_cycle else []
     violations = _state.get_current_policy_hits() if _state.current_cycle else []
     risks = _state.get_current_risk_signals() if _state.current_cycle else []
@@ -375,9 +580,9 @@ async def get_signals_summary():
 # INSIGHTS ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/insights")
-async def get_insights(limit: int = 10):
-    """Get recent insights."""
+@app.get("/insights", tags=["Insights"])
+async def get_insights(limit: int = Query(default=10, ge=1, le=100, description="Max insights to return")):
+    """Get recent insights generated by the Explanation Engine."""
     recent = _insights[-limit:] if _insights else []
     return {
         "insights": [
@@ -399,9 +604,9 @@ async def get_insights(limit: int = 10):
     }
 
 
-@app.get("/insight/{insight_id}")
+@app.get("/insight/{insight_id}", tags=["Insights"])
 async def get_insight(insight_id: str):
-    """Get specific insight details."""
+    """Get specific insight with causal links and evidence chain."""
     for insight in _insights:
         if insight.insight_id == insight_id:
             # Get associated cycle
@@ -453,9 +658,9 @@ async def get_insight(insight_id: str):
 # HYPOTHESES (ANOMALIES) ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/hypotheses")
-async def get_hypotheses(limit: int = 50):
-    """Get all anomalies/hypotheses."""
+@app.get("/hypotheses", tags=["Anomalies"])
+async def get_hypotheses(limit: int = Query(default=50, ge=1, le=500)):
+    """Get all anomalies/hypotheses from recent reasoning cycles."""
     all_anomalies = []
     
     for cycle in _state._completed_cycles[-10:]:
@@ -477,9 +682,9 @@ async def get_hypotheses(limit: int = 50):
 # POLICY ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/policies")
+@app.get("/policies", tags=["Compliance"])
 async def get_policies():
-    """Get all policy definitions."""
+    """Get all policy definitions enforced by the Compliance Agent."""
     from agents.compliance_agent import POLICIES
     
     return {
@@ -495,9 +700,9 @@ async def get_policies():
     }
 
 
-@app.get("/policy/violations")
-async def get_policy_violations(limit: int = 50):
-    """Get policy violations."""
+@app.get("/policy/violations", tags=["Compliance"])
+async def get_policy_violations(limit: int = Query(default=50, ge=1, le=500)):
+    """Get detected policy violations from recent cycles."""
     all_violations = []
     
     for cycle in _state._completed_cycles[-10:]:
@@ -518,9 +723,9 @@ async def get_policy_violations(limit: int = 50):
 # WORKFLOW ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/workflows")
+@app.get("/workflows", tags=["Workflows"])
 async def get_workflows():
-    """Get tracked workflows."""
+    """Get tracked workflows with step completion status."""
     workflows = _master._workflow_agent.get_tracked_workflows()
     
     return {
@@ -537,9 +742,9 @@ async def get_workflows():
     }
 
 
-@app.get("/workflow/{workflow_id}/graph")
+@app.get("/workflow/{workflow_id}/graph", tags=["Workflows"])
 async def get_workflow_graph(workflow_id: str):
-    """Get workflow graph visualization data."""
+    """Get workflow graph visualization data — nodes and edges for DAG rendering."""
     from agents.workflow_agent import WORKFLOW_DEFINITIONS
     
     # Find workflow type
@@ -797,7 +1002,7 @@ async def get_workflow_timeline(workflow_id: str):
 # RESOURCE ENDPOINTS (for Resource & Cost Intelligence page)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/resources")
+@app.get("/resources", tags=["Resources"])
 async def get_resources():
     """
     Get all tracked resources with current metrics and status.
@@ -866,8 +1071,8 @@ async def get_resources():
     return {"resources": resources}
 
 
-@app.get("/resources/{resource_id}/metrics")
-async def get_resource_metrics(resource_id: str, limit: int = 50):
+@app.get("/resources/{resource_id}/metrics", tags=["Resources"])
+async def get_resource_metrics(resource_id: str, limit: int = Query(default=50, ge=1, le=500)):
     """Get metric history for a specific resource."""
     recent = _observation.get_recent_metrics(count=500)
     metrics = [m for m in recent if m.resource_id == resource_id][-limit:]
@@ -885,9 +1090,9 @@ async def get_resource_metrics(resource_id: str, limit: int = 50):
     }
 
 
-@app.get("/observe/events")
-async def get_recent_events(limit: int = 50):
-    """Get recent events (alias for the frontend)."""
+@app.get("/observe/events", tags=["Observation"])
+async def get_recent_events(limit: int = Query(default=50, ge=1, le=1000)):
+    """Get recent events from the observation layer."""
     events = _observation.get_recent_events(count=limit)
     return {
         "events": [
@@ -905,9 +1110,9 @@ async def get_recent_events(limit: int = 50):
     }
 
 
-@app.get("/observe/metrics")
-async def get_recent_metrics(limit: int = 100):
-    """Get recent metrics."""
+@app.get("/observe/metrics", tags=["Observation"])
+async def get_recent_metrics(limit: int = Query(default=100, ge=1, le=1000)):
+    """Get recent metrics from the observation layer."""
     metrics = _observation.get_recent_metrics(count=limit)
     return {
         "metrics": [
@@ -926,9 +1131,9 @@ async def get_recent_metrics(limit: int = 100):
 # CAUSAL ANALYSIS ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/graph/path/{insight_id}")
+@app.get("/graph/path/{insight_id}", tags=["Causal"])
 async def get_causal_path(insight_id: str):
-    """Get causal graph path for an insight."""
+    """Get causal graph path for an insight — nodes and edges for graph rendering."""
     # Find insight
     insight = None
     for i in _insights:
@@ -988,9 +1193,9 @@ async def get_causal_path(insight_id: str):
 # SIMULATION CONTROL
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.post("/simulation/tick")
+@app.post("/simulation/tick", tags=["Simulation"])
 async def trigger_simulation_tick():
-    """Manually trigger a simulation tick (for testing)."""
+    """Manually trigger a simulation tick (for testing / demo)."""
     events, metrics = _simulation.tick()
     
     for event in events:
@@ -1004,9 +1209,9 @@ async def trigger_simulation_tick():
     }
 
 
-@app.post("/analysis/cycle")
+@app.post("/analysis/cycle", tags=["Simulation"])
 async def trigger_analysis_cycle():
-    """Manually trigger an analysis cycle (for testing)."""
+    """Manually trigger an MCP reasoning cycle (for testing / demo)."""
     result = _master.run_cycle()
     _cycle_results.append(result)
     
@@ -1036,7 +1241,7 @@ class RAGQueryRequest(BaseModel):
     query: str
 
 
-@app.post("/rag/query")
+@app.post("/rag/query", tags=["Query"])
 async def rag_query(request: RAGQueryRequest):
     """
     Reasoning Query Interface - NOT a chatbot.
@@ -1055,7 +1260,7 @@ async def rag_query(request: RAGQueryRequest):
     return response.to_dict()
 
 
-@app.get("/rag/examples")
+@app.get("/rag/examples", tags=["Query"])
 async def rag_examples():
     """Get example queries for the RAG interface."""
     return {
@@ -1076,8 +1281,8 @@ async def rag_examples():
 # RISK INDEX - SYSTEM HEALTH OVER TIME (STOCK-MARKET STYLE)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/risk/index")
-async def get_risk_index(limit: int = 50):
+@app.get("/risk/index", tags=["Risk"])
+async def get_risk_index(limit: int = Query(default=50, ge=1, le=500)):
     """
     Get risk index history - Stock-market style graph data.
     
@@ -1102,7 +1307,7 @@ async def get_risk_index(limit: int = 50):
     }
 
 
-@app.get("/risk/current")
+@app.get("/risk/current", tags=["Risk"])
 async def get_current_risk():
     """Get current risk state with breakdown."""
     tracker = get_risk_tracker()
@@ -1145,7 +1350,7 @@ async def get_current_risk():
 # DATA SOURCE ATTRIBUTION (FOR JUDGES)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/data-sources")
+@app.get("/data-sources", tags=["System"])
 async def get_data_sources():
     """
     Show data source attribution for all UI elements.
@@ -1208,7 +1413,7 @@ async def get_data_sources():
 _scenario_agent = ScenarioInjectionAgent()
 
 
-@app.get("/scenarios")
+@app.get("/scenarios", tags=["Scenarios"])
 async def list_scenarios():
     """List all available stress test scenarios."""
     return {
@@ -1221,7 +1426,7 @@ class ScenarioRequest(BaseModel):
     scenario_id: str
 
 
-@app.post("/scenarios/inject")
+@app.post("/scenarios/inject", tags=["Scenarios"])
 async def inject_scenario(request: ScenarioRequest):
     """
     Inject a stress scenario into the system.
@@ -1239,8 +1444,8 @@ async def inject_scenario(request: ScenarioRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/scenarios/executions")
-async def get_scenario_executions(limit: int = 10):
+@app.get("/scenarios/executions", tags=["Scenarios"])
+async def get_scenario_executions(limit: int = Query(default=10, ge=1, le=100)):
     """Get recent scenario execution history."""
     return {
         "executions": _scenario_agent.get_executions(limit),
@@ -1252,7 +1457,7 @@ async def get_scenario_executions(limit: int = 10):
 # ADAPTIVE BASELINES (Round 2: Adaptive Intelligence)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/baselines")
+@app.get("/baselines", tags=["Baselines"])
 async def get_baselines():
     """
     Get all learned baselines from the AdaptiveBaselineAgent.
@@ -1265,7 +1470,7 @@ async def get_baselines():
     }
 
 
-@app.get("/baselines/{entity}/{metric}")
+@app.get("/baselines/{entity}/{metric}", tags=["Baselines"])
 async def get_baseline_detail(entity: str, metric: str):
     """Get baseline for a specific entity+metric."""
     result = _master.adaptive_baseline_agent.get_baseline_for(entity, metric)
@@ -1274,8 +1479,8 @@ async def get_baseline_detail(entity: str, metric: str):
     return result
 
 
-@app.get("/baselines/deviations")
-async def get_baseline_deviations(limit: int = 20):
+@app.get("/baselines/deviations", tags=["Baselines"])
+async def get_baseline_deviations(limit: int = Query(default=20, ge=1, le=200)):
     """Get recent deviation checks from the AdaptiveBaselineAgent."""
     return {
         "deviations": _master.adaptive_baseline_agent.get_recent_deviations(limit),
@@ -1294,7 +1499,7 @@ class QueryAgentRequest(BaseModel):
     query: str
 
 
-@app.post("/query")
+@app.post("/query", tags=["Query"])
 async def query_agent_endpoint(request: QueryAgentRequest):
     """
     Query the system using the QueryAgent (Agentic RAG).
@@ -1313,8 +1518,8 @@ async def query_agent_endpoint(request: QueryAgentRequest):
 # AGENT ACTIVITY FEED
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/agents/activity")
-async def get_agent_activity(limit: int = 50):
+@app.get("/agents/activity", tags=["Agents"])
+async def get_agent_activity(limit: int = Query(default=50, ge=1, le=500)):
     """
     Get a chronological feed of all agent activity.
     
@@ -1384,7 +1589,7 @@ async def get_agent_activity(limit: int = 50):
 # AGENT REGISTRY (for judges: "how many agents?")
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/agents")
+@app.get("/agents", tags=["Agents"])
 async def list_agents():
     """
     List all agents in the system with their roles.
@@ -1472,15 +1677,192 @@ async def list_agents():
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/health")
+@app.get("/health", tags=["System"])
 async def health_check():
-    """API health check."""
+    """
+    Deep health check — production-grade liveness + readiness probe.
+
+    Returns component-level health for monitoring/alerting.
+    Compatible with Kubernetes health probes.
+    """
+    now = datetime.utcnow()
+    uptime_seconds = (now - _startup_time).total_seconds() if _startup_time else 0
+
+    # Component health checks
+    components = {
+        "simulation_engine": "healthy" if _simulation is not None else "unavailable",
+        "observation_layer": "healthy" if _observation is not None else "unavailable",
+        "shared_state": "healthy" if _state is not None else "unavailable",
+        "mcp_brain": "healthy" if _master is not None else "unavailable",
+        "explanation_engine": "healthy" if _explanation is not None else "unavailable",
+        "reasoning_loop": "running" if _running and _reasoning_task and not _reasoning_task.done() else "stopped",
+    }
+
+    all_healthy = all(v in ("healthy", "running") for v in components.values())
+
     return {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "status": "healthy" if all_healthy else "degraded",
+        "version": settings.APP_VERSION,
+        "environment": settings.ENVIRONMENT,
+        "timestamp": now.isoformat(),
+        "uptime_seconds": round(uptime_seconds),
         "cycles_completed": len(_cycle_results),
         "insights_generated": len(_insights),
-        "agents_active": 9
+        "agents_active": 9,
+        "cycle_interval": settings.CYCLE_INTERVAL_SECONDS,
+        "components": components,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MCP BRAIN STATE — The System's Cognitive Intelligence
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/mcp/brain", tags=["MCP Brain"])
+async def get_mcp_brain_state():
+    """
+    Get the Master Control Program's brain state.
+    
+    This exposes the MCP's situational awareness:
+    - System pulse (calm/elevated/stressed/critical)
+    - Severity trend (escalating/recovering/stable)
+    - Observation window adaptation
+    - Agent dominance patterns
+    - Cycle-over-cycle diagnostics
+    
+    This is what makes Chronos AI a reasoning system, not a dashboard.
+    """
+    return {
+        "mcp": _master.get_brain_state(),
+        "description": "MCP brain state — the system's cognitive awareness"
+    }
+
+
+@app.get("/mcp/pulse", tags=["MCP Brain"])
+async def get_system_pulse():
+    """
+    Get current system pulse — a single word that summarizes system state.
+    
+    CALM → ELEVATED → STRESSED → CRITICAL
+    
+    The pulse drives:
+    - How far back the MCP looks (observation window)
+    - How many workers it spins up (parallelism)
+    - How aggressively it escalates recommendations
+    """
+    brain = _master.get_brain_state()
+    return {
+        "pulse": brain["system_pulse"],
+        "severity_trend": brain["severity_trend"],
+        "consecutive_critical": brain["consecutive_critical_cycles"],
+        "total_cycles": brain["total_cycles_completed"],
+        "observation_window": brain["observation_window"],
+        "worker_pool": brain["worker_pool_size"],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE & GRAPH ENDPOINTS — Hybrid DB Intelligence
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/db/stats", tags=["Database"])
+async def get_db_stats():
+    """
+    Get database statistics — SQLite row counts + Neo4j graph stats.
+    Shows persistence health for judges.
+    """
+    import asyncio
+    from db import get_sqlite_store
+    from graph import get_neo4j_client
+
+    sqlite_stats = get_sqlite_store().get_stats()
+
+    # Run Neo4j stats in thread to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    try:
+        neo4j_stats = await asyncio.wait_for(
+            loop.run_in_executor(None, get_neo4j_client().get_stats),
+            timeout=5.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        neo4j_stats = get_neo4j_client().get_stats() if not get_neo4j_client().is_connected else {"status": "timeout"}
+
+    return {
+        "sqlite": sqlite_stats,
+        "neo4j": neo4j_stats,
+        "architecture": "Hybrid — SQLite for operational data, Neo4j for knowledge graph",
+    }
+
+
+@app.get("/graph/entity/{entity_id}", tags=["Graph"])
+async def get_entity_graph(entity_id: str):
+    """
+    Get all relationships for an entity from the Neo4j knowledge graph.
+    Entity can be a workflow, resource, anomaly, or agent.
+    """
+    import asyncio
+    from graph import get_neo4j_client
+    client = get_neo4j_client()
+    loop = asyncio.get_event_loop()
+    try:
+        relationships = await asyncio.wait_for(
+            loop.run_in_executor(None, client.get_entity_relationships, entity_id),
+            timeout=5.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        relationships = []
+    return {
+        "entity_id": entity_id,
+        "relationships": relationships,
+        "count": len(relationships),
+    }
+
+
+@app.get("/graph/ripple/{step_id}", tags=["Graph"])
+async def get_ripple_effect(step_id: str):
+    """
+    Get downstream impact of a failed step — ripple effect analysis.
+    Uses Neo4j graph traversal to find all affected downstream steps.
+    """
+    import asyncio
+    from graph import get_neo4j_client
+    client = get_neo4j_client()
+    loop = asyncio.get_event_loop()
+    try:
+        ripple = await asyncio.wait_for(
+            loop.run_in_executor(None, client.get_ripple_effect, step_id),
+            timeout=5.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        ripple = []
+    return {
+        "failed_step": step_id,
+        "downstream_impact": ripple,
+        "affected_count": len(ripple),
+    }
+
+
+@app.get("/graph/causal-chain/{anomaly_id}", tags=["Graph"])
+async def get_causal_chain(anomaly_id: str):
+    """
+    Trace the full causal chain for an anomaly.
+    Uses Neo4j CAUSED_BY edges to walk back to root cause.
+    """
+    import asyncio
+    from graph import get_neo4j_client
+    client = get_neo4j_client()
+    loop = asyncio.get_event_loop()
+    try:
+        chain = await asyncio.wait_for(
+            loop.run_in_executor(None, client.get_causal_chain, anomaly_id),
+            timeout=5.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        chain = []
+    return {
+        "anomaly_id": anomaly_id,
+        "causal_chain": chain,
+        "chain_depth": len(chain),
     }
 
 
@@ -1488,8 +1870,8 @@ async def health_check():
 # MISSING ENDPOINTS (required by frontend)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/events")
-async def get_events(limit: int = 50):
+@app.get("/events", tags=["Observation"])
+async def get_events(limit: int = Query(default=50, ge=1, le=1000)):
     """Get recent events (alias for /observe/events used by overview page)."""
     events = _observation.get_recent_events(limit)
     return [
@@ -1506,7 +1888,7 @@ async def get_events(limit: int = 50):
     ]
 
 
-@app.get("/anomalies")
+@app.get("/anomalies", tags=["Anomalies"])
 async def get_anomalies():
     """Get all anomalies from recent cycles (used by anomaly-center page)."""
     all_anomalies = []
@@ -1525,7 +1907,7 @@ async def get_anomalies():
     return all_anomalies[-50:]
 
 
-@app.get("/anomalies/summary")
+@app.get("/anomalies/summary", tags=["Anomalies"])
 async def get_anomalies_summary():
     """Get anomaly summary stats (used by anomaly-center page)."""
     all_anomalies = []
@@ -1548,7 +1930,7 @@ async def get_anomalies_summary():
     }
 
 
-@app.get("/compliance/summary")
+@app.get("/compliance/summary", tags=["Compliance"])
 async def get_compliance_summary():
     """Get compliance summary (used by compliance page)."""
     from agents.compliance_agent import POLICIES
@@ -1574,7 +1956,7 @@ async def get_compliance_summary():
     }
 
 
-@app.get("/causal/links")
+@app.get("/causal/links", tags=["Causal"])
 async def get_causal_links():
     """Get causal links from recent cycles (used by causal-analysis page)."""
     all_links = []
@@ -1609,7 +1991,7 @@ def _anomaly_severity(anomaly) -> str:
 # CHART / TREND DATA ENDPOINTS (for frontend charts)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/anomalies/trend")
+@app.get("/anomalies/trend", tags=["Anomalies"])
 async def get_anomaly_trend():
     """
     Get anomaly counts per cycle (for bar/area charts on overview & anomaly pages).
@@ -1634,7 +2016,7 @@ async def get_anomaly_trend():
     return trend
 
 
-@app.get("/compliance/trend")
+@app.get("/compliance/trend", tags=["Compliance"])
 async def get_compliance_trend():
     """
     Get compliance violation counts per cycle (for compliance page charts).
@@ -1658,7 +2040,7 @@ async def get_compliance_trend():
     return trend
 
 
-@app.get("/resources/trend")
+@app.get("/resources/trend", tags=["Resources"])
 async def get_resource_trend():
     """
     Get resource utilization trend for charts.
@@ -1685,7 +2067,7 @@ async def get_resource_trend():
     }
 
 
-@app.get("/cost/trend")
+@app.get("/cost/trend", tags=["Resources"])
 async def get_cost_trend():
     """
     Get simulated operational cost data for the cost overview chart.
@@ -1720,7 +2102,7 @@ async def get_cost_trend():
     return trend[-24:]  # Last 24 resources
 
 
-@app.get("/overview/stats")
+@app.get("/overview/stats", tags=["System"])
 async def get_overview_stats():
     """
     Get aggregated stats for the overview dashboard.

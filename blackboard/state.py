@@ -173,6 +173,11 @@ class SharedState:
     - Each agent appends its own section
     - No overwrites
     - No deletions in same cycle
+    
+    Persistence:
+    - Primary: SQLite (cycles, anomalies, policy_hits, recommendations)
+    - In-memory: current cycle + bounded cache of recent completed cycles
+    - JSONL: backup (append-only)
     """
     
     def __init__(self, storage_path: str = "blackboard/cycles.jsonl"):
@@ -181,17 +186,24 @@ class SharedState:
         
         self._current_cycle: Optional[ReasoningCycle] = None
         self._completed_cycles: List[ReasoningCycle] = []
+        self._max_cache = 50  # Keep last N cycles in memory
         self._lock = threading.Lock()
+        self._db = None
         
         self._load_history()
+    
+    def _get_db(self):
+        """Lazy-init SQLite store."""
+        if self._db is None:
+            from db import get_sqlite_store
+            self._db = get_sqlite_store()
+        return self._db
     
     def _load_history(self):
         """Load completed cycles from storage."""
         if not self._storage_path.exists():
             return
-        
-        # For now, just ensure the file exists
-        # Full deserialization can be implemented if needed
+        # JSONL exists for backward compat; SQLite is source of truth now
     
     # ─────────────────────────────────────────────────────────────────────────────
     # CYCLE MANAGEMENT
@@ -208,24 +220,82 @@ class SharedState:
             return cycle_id
     
     def complete_cycle(self) -> Optional[ReasoningCycle]:
-        """Complete the current cycle and persist it."""
+        """Complete the current cycle and persist to SQLite + JSONL."""
         with self._lock:
             if not self._current_cycle:
                 return None
             
             self._current_cycle.completed_at = datetime.utcnow()
-            self._persist_cycle(self._current_cycle)
+            
+            # Persist to JSONL (backup)
+            self._persist_cycle_jsonl(self._current_cycle)
+            
+            # Persist to SQLite (primary)
+            self._persist_cycle_sqlite(self._current_cycle)
+            
+            # Add to in-memory cache (bounded)
             self._completed_cycles.append(self._current_cycle)
+            if len(self._completed_cycles) > self._max_cache:
+                self._completed_cycles = self._completed_cycles[-self._max_cache:]
             
             completed = self._current_cycle
             self._current_cycle = None
             
             return completed
     
-    def _persist_cycle(self, cycle: ReasoningCycle):
-        """Persist a cycle to storage."""
-        with open(self._storage_path, 'a') as f:
-            f.write(json.dumps(cycle.to_dict()) + '\n')
+    def _persist_cycle_jsonl(self, cycle: ReasoningCycle):
+        """Persist a cycle to JSONL backup."""
+        try:
+            with open(self._storage_path, 'a') as f:
+                f.write(json.dumps(cycle.to_dict()) + '\n')
+        except Exception:
+            pass
+    
+    def _persist_cycle_sqlite(self, cycle: ReasoningCycle):
+        """Persist cycle + all findings to SQLite."""
+        try:
+            db = self._get_db()
+            
+            # Insert cycle summary
+            db.insert_cycle(
+                cycle_id=cycle.cycle_id,
+                started_at=cycle.started_at.isoformat(),
+                completed_at=cycle.completed_at.isoformat() if cycle.completed_at else "",
+                anomaly_count=len(cycle.anomalies),
+                policy_hit_count=len(cycle.policy_hits),
+                risk_signal_count=len(cycle.risk_signals),
+                causal_link_count=len(cycle.causal_links),
+                recommendation_count=len(cycle.recommendations),
+            )
+            
+            # Insert anomalies
+            for a in cycle.anomalies:
+                db.insert_anomaly(
+                    anomaly_id=a.anomaly_id, cycle_id=cycle.cycle_id,
+                    type=a.type, agent=a.agent, description=a.description,
+                    confidence=a.confidence, timestamp=a.timestamp.isoformat(),
+                    evidence=a.evidence,
+                )
+            
+            # Insert policy hits
+            for h in cycle.policy_hits:
+                db.insert_policy_hit(
+                    hit_id=h.hit_id, cycle_id=cycle.cycle_id,
+                    policy_id=h.policy_id, event_id=h.event_id,
+                    violation_type=h.violation_type, agent=h.agent,
+                    description=h.description, timestamp=h.timestamp.isoformat(),
+                )
+            
+            # Insert recommendations
+            for r in cycle.recommendations:
+                db.insert_recommendation(
+                    rec_id=r.rec_id, cycle_id=cycle.cycle_id,
+                    cause=r.cause, action=r.action,
+                    urgency=r.urgency, rationale=r.rationale,
+                    timestamp=r.timestamp.isoformat(),
+                )
+        except Exception:
+            pass  # SQLite failure should not break the reasoning loop
     
     @property
     def current_cycle(self) -> Optional[ReasoningCycle]:

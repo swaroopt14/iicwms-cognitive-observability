@@ -55,19 +55,35 @@ class ObservationLayer:
     - Append-only
     - Time-ordered
     - No aggregation
+    
+    Persistence:
+    - Primary: SQLite (db/sqlite_store.py)
+    - In-memory buffer for fast recent queries
+    - JSONL kept as optional backup
     """
     
     def __init__(self, storage_path: str = "observation/events.jsonl"):
         self._storage_path = Path(storage_path)
         self._storage_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # In-memory buffer for fast access
+        # In-memory buffer for fast access (bounded)
         self._events: List[ObservedEvent] = []
         self._metrics: List[ObservedMetric] = []
         self._lock = threading.Lock()
+        self._max_buffer = 5000  # Keep last N in memory
         
-        # Load existing data
+        # SQLite store (lazy init to avoid circular import at module level)
+        self._db = None
+        
+        # Load existing data from JSONL (backward compat)
         self._load_from_storage()
+    
+    def _get_db(self):
+        """Lazy-init SQLite store."""
+        if self._db is None:
+            from db import get_sqlite_store
+            self._db = get_sqlite_store()
+        return self._db
     
     def _load_from_storage(self):
         """Load existing observations from storage."""
@@ -111,6 +127,7 @@ class ObservationLayer:
         POST /observe/event
         
         Ingest a raw event. No interpretation.
+        Writes to: in-memory buffer + SQLite + JSONL backup.
         """
         with self._lock:
             observed = ObservedEvent(
@@ -125,7 +142,26 @@ class ObservationLayer:
             )
             
             self._events.append(observed)
+            # Bound in-memory buffer
+            if len(self._events) > self._max_buffer:
+                self._events = self._events[-self._max_buffer:]
+            
             self._persist_event(observed)
+            
+            # Write to SQLite
+            try:
+                self._get_db().insert_event(
+                    event_id=observed.event_id,
+                    type=observed.type,
+                    workflow_id=observed.workflow_id,
+                    actor=observed.actor,
+                    resource=observed.resource,
+                    timestamp=observed.timestamp.isoformat(),
+                    metadata=observed.metadata,
+                    observed_at=observed.observed_at.isoformat(),
+                )
+            except Exception:
+                pass  # SQLite write failure should not block observation
             
             return observed
     
@@ -134,6 +170,7 @@ class ObservationLayer:
         POST /observe/metric
         
         Ingest a raw metric. No interpretation.
+        Writes to: in-memory buffer + SQLite + JSONL backup.
         """
         with self._lock:
             observed = ObservedMetric(
@@ -145,7 +182,23 @@ class ObservationLayer:
             )
             
             self._metrics.append(observed)
+            # Bound in-memory buffer
+            if len(self._metrics) > self._max_buffer:
+                self._metrics = self._metrics[-self._max_buffer:]
+            
             self._persist_metric(observed)
+            
+            # Write to SQLite
+            try:
+                self._get_db().insert_metric(
+                    resource_id=observed.resource_id,
+                    metric=observed.metric,
+                    value=observed.value,
+                    timestamp=observed.timestamp.isoformat(),
+                    observed_at=observed.observed_at.isoformat(),
+                )
+            except Exception:
+                pass  # SQLite write failure should not block observation
             
             return observed
     

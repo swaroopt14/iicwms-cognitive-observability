@@ -22,6 +22,7 @@ Temporal + dependency reasoning is enough.
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
+import threading
 
 from blackboard import (
     SharedState, CausalLink,
@@ -82,13 +83,21 @@ class CausalAgent:
     NO ML REQUIRED. Temporal + dependency reasoning is enough.
     
     Agents do NOT communicate directly.
-    All output goes to SharedState.
+    All output goes to SharedState + Neo4j (if enabled).
     """
     
     AGENT_NAME = "CausalAgent"
     
     def __init__(self):
         self._identified_links: List[str] = []  # Track for dedup
+        self._graph = None
+    
+    def _get_graph(self):
+        """Lazy-init Neo4j client."""
+        if self._graph is None:
+            from graph import get_neo4j_client
+            self._graph = get_neo4j_client()
+        return self._graph
     
     def analyze(
         self,
@@ -206,8 +215,8 @@ class CausalAgent:
         time_factor = 1.0 - (candidate.temporal_distance.total_seconds() / 60)  # Closer = higher
         adjusted_confidence = base_confidence * max(0.5, time_factor)
         
-        # Create causal link
-        return state.add_causal_link(
+        # Create causal link in blackboard
+        link = state.add_causal_link(
             cause=candidate.cause_type,
             effect=candidate.effect_type,
             cause_entity=candidate.cause_entity,
@@ -216,6 +225,23 @@ class CausalAgent:
             reasoning=pattern["reasoning"],
             evidence_ids=candidate.evidence_ids
         )
+        
+        # Write to Neo4j knowledge graph (fire-and-forget in background thread)
+        def _write():
+            try:
+                self._get_graph().write_causal_link(
+                    cause=candidate.cause_type,
+                    effect=candidate.effect_type,
+                    cause_entity=candidate.cause_entity,
+                    effect_entity=candidate.effect_entity,
+                    confidence=adjusted_confidence,
+                    reasoning=pattern["reasoning"],
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_write, daemon=True).start()
+        
+        return link
     
     def get_causal_chain(self, entity: str) -> List[CausalLink]:
         """

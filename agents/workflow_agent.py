@@ -103,7 +103,13 @@ class WorkflowAgent:
         anomalies = []
         
         # Process events in chronological order
-        sorted_events = sorted(events, key=lambda e: e.timestamp)
+        # Normalize to naive UTC to avoid offset-aware vs naive comparison errors
+        def _safe_ts(e):
+            ts = e.timestamp
+            if ts.tzinfo is not None:
+                return ts.replace(tzinfo=None)
+            return ts
+        sorted_events = sorted(events, key=_safe_ts)
         
         for event in sorted_events:
             if not event.workflow_id:
