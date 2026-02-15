@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { Search, Bell, Settings, ChevronDown, Sparkles, Clock, Command, Zap } from 'lucide-react';
+import { Search, Bell, ChevronDown, Sparkles, Clock, Command } from 'lucide-react';
 
 // Breadcrumb label from pathname
 const pageTitles: Record<string, string> = {
@@ -16,6 +16,7 @@ const pageTitles: Record<string, string> = {
   '/search': 'Ask Chronos AI',
   '/system-graph': 'Risk Index',
   '/scenarios': 'Scenario Lab',
+  '/audit': 'Audit Investigation',
 };
 
 export default function Header() {

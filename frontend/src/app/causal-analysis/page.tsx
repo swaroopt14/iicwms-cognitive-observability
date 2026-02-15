@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   GitMerge,
@@ -519,7 +519,14 @@ function SnapshotModal({ link, allLinks, onClose }: { link: CausalLink; allLinks
 function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: CausalLink; allLinks: CausalLink[]; onClose: () => void; onNavigate: (path: string) => void }) {
   const [showSnapshot, setShowSnapshot] = useState(false);
   const confidenceColor = link.confidence > 70 ? '#10b981' : link.confidence > 40 ? '#f59e0b' : '#ef4444';
-  const trendData = Array.from({ length: 8 }, () => 30 + Math.random() * 50);
+  const trendData = useMemo(() => {
+    const similar = allLinks
+      .filter((l) => l.cause === link.cause && l.effect === link.effect)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+      .map((l) => l.confidence);
+    if (similar.length >= 2) return similar.slice(-8);
+    return Array.from({ length: 8 }, (_, i) => Math.max(0, Math.min(100, link.confidence - (7 - i) * 2)));
+  }, [allLinks, link.cause, link.effect, link.confidence]);
 
   // Impact analysis data
   const impactAnalysis = {
@@ -527,6 +534,10 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
     upstreamCauses: allLinks.filter(l => l.effect === link.cause).length,
     blastRadius: new Set(allLinks.filter(l => l.cause === link.cause || l.cause === link.effect).map(l => l.effect)).size,
   };
+
+  const competingCauses = allLinks.filter(
+    (l) => l.effect === link.effect && l.cause !== link.cause
+  ).length;
 
   // Root cause path (find the full chain ending at this link's effect)
   const rootCausePath: string[] = [];
@@ -544,8 +555,7 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/30 backdrop-blur-sm z-40" onClick={onClose} />
-      <div className="drawer">
+      <div className="card border border-[var(--color-border)] overflow-hidden">
         <div className="p-5 border-b border-[var(--color-border)] flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
           <div className="flex items-center gap-3">
             <div className="icon-container icon-container-md bg-gradient-to-br from-indigo-500 to-violet-500 shadow-md">
@@ -561,7 +571,7 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
           </button>
         </div>
 
-        <div className="p-5 space-y-5 overflow-y-auto h-[calc(100vh-140px)]">
+        <div className="p-5 space-y-5">
           {/* Cause -> Effect */}
           <div className="p-5 bg-gradient-to-r from-indigo-50 to-violet-50 rounded-xl border border-indigo-200">
             <div className="flex items-center justify-center gap-4">
@@ -618,7 +628,7 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
               </div>
             </div>
             <div className="p-4 rounded-xl border border-[var(--color-border)]">
-              <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Correlation Trend</div>
+              <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Confidence History</div>
               <Sparkline data={trendData} color="#6366f1" width={140} height={48} />
             </div>
           </div>
@@ -649,13 +659,15 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
             <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">Agent Reasoning</div>
             <div className="p-4 bg-slate-50 rounded-xl space-y-3">
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Temporal correlation:</strong> {link.cause.toLowerCase()} events consistently precede {link.effect.toLowerCase()} outcomes within a 2-5 minute window.
+                <strong>Temporal ordering:</strong> This link was inferred from sequence patterns where <code>{link.cause}</code> appears before <code>{link.effect}</code> in recent cycles.
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Statistical basis:</strong> The correlation exceeds the {link.confidence}% confidence threshold across {3 + Math.floor(link.confidence / 20)} observed instances. P-value: {(1 - link.confidence / 100).toFixed(3)}.
+                <strong>Strength score:</strong> CausalAgent assigned <code>{link.confidence}%</code> confidence for this relation based on graph consistency and available evidence IDs.
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Ruling out alternatives:</strong> No other events or metrics better explain the {link.effect.split(' ')[0].toLowerCase()} pattern. Time-lagged cross-correlation confirms directionality.
+                <strong>Alternative causes:</strong> {competingCauses === 0
+                  ? `No competing causes currently linked to "${link.effect}" in the active graph.`
+                  : `${competingCauses} alternate cause link(s) also target "${link.effect}", so treat this as probable rather than absolute.`}
               </p>
             </div>
           </div>
@@ -847,6 +859,16 @@ export default function CausalAnalysisPage() {
         </div>
       </div>
 
+      {/* Detail Panel */}
+      {selectedLink && (
+        <InsightDetailPanel
+          link={selectedLink}
+          allLinks={displayLinks}
+          onClose={() => setSelectedLink(null)}
+          onNavigate={(path) => { setSelectedLink(null); router.push(path); }}
+        />
+      )}
+
       {/* Info */}
       <div className="p-5 bg-gradient-to-r from-indigo-50 via-violet-50 to-purple-50 rounded-2xl border border-indigo-100">
         <div className="flex items-start gap-4">
@@ -863,15 +885,6 @@ export default function CausalAnalysisPage() {
         </div>
       </div>
 
-      {/* Detail Panel */}
-      {selectedLink && (
-        <InsightDetailPanel
-          link={selectedLink}
-          allLinks={displayLinks}
-          onClose={() => setSelectedLink(null)}
-          onNavigate={(path) => { setSelectedLink(null); router.push(path); }}
-        />
-      )}
     </div>
   );
 }

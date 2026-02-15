@@ -9,7 +9,6 @@ import {
   Shield,
   Network,
   Lightbulb,
-  Search,
   TrendingUp,
   DollarSign,
   Database,
@@ -19,6 +18,7 @@ import {
   FlaskConical,
   Bot,
   ChevronDown,
+  ScrollText,
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -46,6 +46,7 @@ const navGroups = [
     items: [
       { href: '/search', label: 'Ask Chronos AI', icon: Bot },
       { href: '/insight-feed', label: 'Insight Feed', icon: Lightbulb },
+      { href: '/audit', label: 'Audit Investigation', icon: ScrollText },
     ],
   },
   {

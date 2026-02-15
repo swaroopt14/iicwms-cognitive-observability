@@ -26,6 +26,7 @@ from .causal_agent import CausalAgent
 from .query_agent import QueryAgent
 from .adaptive_baseline_agent import AdaptiveBaselineAgent
 from .scenario_injection_agent import ScenarioInjectionAgent
+from .code_agent import CodeAgent
 from .master_agent import MasterAgent, CycleResult
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "QueryAgent",
     "AdaptiveBaselineAgent",
     "ScenarioInjectionAgent",
+    "CodeAgent",
     "MasterAgent",
     "CycleResult",
 ]

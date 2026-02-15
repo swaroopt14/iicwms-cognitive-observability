@@ -205,6 +205,11 @@ iicwms-cognitive-observability/
 
 ## Quick Start
 
+### Prerequisites
+
+- Python 3.10+ (recommended: 3.12+)
+- Node.js 18+ and npm
+
 ### Backend (Services 1-9)
 
 ```bash
@@ -238,6 +243,48 @@ npm run dev          # Development → http://localhost:3000
 python3 scripts/seed_demo_data.py
 ```
 
+### Health Checks / Smoke Tests
+
+```bash
+# Backend up?
+curl -s http://localhost:8000/system/health | head
+
+# OpenAPI docs
+open http://localhost:8000/docs   # macOS
+
+# Frontend up?
+curl -I http://localhost:3000 | head
+```
+
+### Demo Flows (No Cloud Required)
+
+```bash
+# 1) Trigger one reasoning cycle (agents run + blackboard cycle created)
+curl -s -X POST http://localhost:8000/analysis/cycle | jq .
+
+# 2) Ingest a GitHub PR webhook (pre-deploy code signal)
+curl -s -X POST http://localhost:8000/ingest/github/webhook \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-GitHub-Event: pull_request' \\
+  -H 'X-GitHub-Delivery: demo-1' \\
+  --data '{"action":"opened","deployment_id":"deploy_demo_001","repository":{"full_name":"paytm/payment-api"},"sender":{"login":"ravi"},"pull_request":{"number":847,"title":"Fix payment timeout regex","changed_files":6,"additions":47,"deletions":12,"head":{"sha":"abc123def456"}},"metadata":{"churn_lines":59,"complexity":8.2,"hotspot_files":["payment_regex.py"]}}' | jq .
+
+# 3) Ingest a GitHub Actions workflow_run webhook (CI signal like coverage)
+curl -s -X POST http://localhost:8000/ingest/github/webhook \\
+  -H 'Content-Type: application/json' \\
+  -H 'X-GitHub-Event: workflow_run' \\
+  -H 'X-GitHub-Delivery: demo-2' \\
+  --data '{"action":"completed","deployment_id":"deploy_demo_001","repository":{"full_name":"paytm/payment-api"},"sender":{"login":"github-actions[bot]"},"workflow_run":{"id":9991,"name":"paytm-cd.yml","conclusion":"success","head_sha":"abc123def456"},"metadata":{"test_coverage":0.62}}' | jq .
+
+# 4) Run another cycle so CodeAgent emits predictive anomalies
+curl -s -X POST http://localhost:8000/analysis/cycle | jq .
+
+# 5) View the workflow timeline (now includes a Code & CI lane)
+open http://localhost:3000/workflow-map   # macOS
+```
+
+> `jq` is optional; remove it if you don't have it installed.
+
 ### Environment Variables
 
 | Variable | Required | Default | Purpose |
@@ -246,6 +293,31 @@ python3 scripts/seed_demo_data.py
 | `ENABLE_CREWAI` | No | `false` | CrewAI multi-agent explanations |
 | `API_HOST` | No | `0.0.0.0` | Server bind address |
 | `API_PORT` | No | `8000` | Server port |
+| `SQLITE_DB_PATH` | No | `data/chronos.db` | SQLite operational store path |
+| `ENABLE_NEO4J` | No | `false` | Enable Neo4j graph (optional) |
+| `NEO4J_URI` | If Neo4j enabled | — | Neo4j connection URI |
+| `NEO4J_USERNAME` | If Neo4j enabled | — | Neo4j username |
+| `NEO4J_PASSWORD` | If Neo4j enabled | — | Neo4j password |
+| `ENABLE_SLACK_ALERTS` | No | `false` | Enable Slack notifications |
+| `SLACK_WEBHOOK_URL` | If Slack enabled | — | Slack Incoming Webhook URL |
+| `FRONTEND_BASE_URL` | No | `http://localhost:3000` | Used in Slack message deep-links |
+
+### Data Persistence (Local)
+
+- SQLite: `data/chronos.db` (created automatically on first run)
+- Observation JSONL (backup): `observation/events.jsonl`
+- Blackboard cycles JSONL (backup): `blackboard/cycles.jsonl`
+
+Neo4j is optional. If `ENABLE_NEO4J=false`, the backend runs with a graceful NullGraphClient.
+
+### Common Troubleshooting (DevOps)
+
+- Backend starts but shows Slack errors:
+  - Set `ENABLE_SLACK_ALERTS=false` in `.env` or provide a valid `SLACK_WEBHOOK_URL`.
+- Frontend shows mock data:
+  - Ensure backend is up on `http://localhost:8000` and `NEXT_PUBLIC_API_URL` is correct.
+- Port conflict:
+  - Change `API_PORT` or run `uvicorn ... --port <new>` and update `NEXT_PUBLIC_API_URL`.
 
 ---
 

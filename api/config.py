@@ -64,6 +64,14 @@ class Settings:
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "structured"  # "structured" or "simple"
 
+    # ── Slack Alerts (Optional) ─────────────────────────────────
+    ENABLE_SLACK_ALERTS: bool = False
+    SLACK_WEBHOOK_URL: str = ""
+    SLACK_ALERT_MIN_SEVERITY: str = "HIGH"      # LOW|MEDIUM|HIGH|CRITICAL
+    SLACK_ALERT_MIN_RISK_STATE: str = "VIOLATION"  # AT_RISK|VIOLATION|INCIDENT
+    SLACK_ALERT_COOLDOWN_SECONDS: int = 120
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
+
 
 def load_settings() -> Settings:
     """Load settings from environment variables with defaults."""
@@ -94,6 +102,14 @@ def load_settings() -> Settings:
         NEO4J_PASSWORD=os.getenv("NEO4J_PASSWORD", ""),
         LOG_LEVEL=os.getenv("LOG_LEVEL", Settings.LOG_LEVEL),
         LOG_FORMAT=os.getenv("LOG_FORMAT", Settings.LOG_FORMAT),
+        ENABLE_SLACK_ALERTS=os.getenv("ENABLE_SLACK_ALERTS", "false").lower() == "true",
+        SLACK_WEBHOOK_URL=os.getenv("SLACK_WEBHOOK_URL", ""),
+        SLACK_ALERT_MIN_SEVERITY=os.getenv("SLACK_ALERT_MIN_SEVERITY", Settings.SLACK_ALERT_MIN_SEVERITY),
+        SLACK_ALERT_MIN_RISK_STATE=os.getenv("SLACK_ALERT_MIN_RISK_STATE", Settings.SLACK_ALERT_MIN_RISK_STATE),
+        SLACK_ALERT_COOLDOWN_SECONDS=int(
+            os.getenv("SLACK_ALERT_COOLDOWN_SECONDS", str(Settings.SLACK_ALERT_COOLDOWN_SECONDS))
+        ),
+        FRONTEND_BASE_URL=os.getenv("FRONTEND_BASE_URL", Settings.FRONTEND_BASE_URL),
     )
 
 

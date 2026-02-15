@@ -15,12 +15,14 @@ ARCHITECTURE LAYER: Interface Gateway
 Exposes observation ingestion, reasoning state, and insight retrieval.
 """
 
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional, Literal
 from contextlib import asynccontextmanager
 import asyncio
 import logging
 import sys
+import hashlib
+import json
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +46,7 @@ from api.middleware import (
     ErrorHandlerMiddleware,
     RateLimitMiddleware,
 )
+from api.slack_notifier import SlackNotifier, SlackConfig
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STRUCTURED LOGGING
@@ -99,6 +102,80 @@ class MetricInput(BaseModel):
     timestamp: str = Field(..., description="ISO 8601 timestamp")
 
 
+class EnterpriseContext(BaseModel):
+    organization_id: str = Field(..., min_length=1, max_length=128)
+    business_unit: Optional[str] = Field(None, max_length=128)
+    project_id: str = Field(..., min_length=1, max_length=128)
+    project_name: Optional[str] = Field(None, max_length=256)
+    environment: Literal["dev", "staging", "production"]
+    region: Optional[str] = Field(None, max_length=64)
+    service_name: str = Field(..., min_length=1, max_length=128)
+    service_type: Optional[str] = Field(None, max_length=64)
+    repository: Optional[str] = Field(None, max_length=512)
+    deployment_id: Optional[str] = Field(None, max_length=128)
+    workflow_id: Optional[str] = Field(None, max_length=128)
+    workflow_version: Optional[str] = Field(None, max_length=64)
+
+
+class ActorContext(BaseModel):
+    actor_id: str = Field(..., min_length=1, max_length=128)
+    actor_type: Literal["human", "service", "automation"]
+    role: Literal["SDE", "DevOps", "Admin", "Security", "QA", "Manager"]
+    team: str = Field(..., min_length=1, max_length=128)
+    access_level: Optional[Literal["read", "write", "admin"]] = None
+    authentication_method: Optional[Literal["SSO", "API_TOKEN", "SERVICE_ACCOUNT"]] = None
+
+
+class SourceSignature(BaseModel):
+    tool_name: str = Field(..., min_length=1, max_length=64)
+    tool_type: str = Field(..., min_length=1, max_length=64)
+    source_host: Optional[str] = Field(None, max_length=128)
+
+
+class NormalizedEvent(BaseModel):
+    event_category: str = Field(..., min_length=1, max_length=64)
+    event_type: str = Field(..., min_length=1, max_length=128)
+    severity: Literal["info", "low", "warning", "medium", "high", "critical"]
+    confidence_initial: float = Field(..., ge=0.0, le=1.0)
+
+
+class MetricsPayload(BaseModel):
+    metric_name: str = Field(..., min_length=1, max_length=128)
+    metric_value: float
+    baseline_value: Optional[float] = None
+
+
+class UnifiedTelemetryEnvelope(BaseModel):
+    schema_version: str = Field(..., min_length=1, max_length=32)
+    event_id: str = Field(..., min_length=1, max_length=128)
+    idempotency_key: str = Field(..., min_length=1, max_length=256)
+    trace_id: str = Field(..., min_length=1, max_length=128)
+    span_id: Optional[str] = Field(None, max_length=128)
+    parent_span_id: Optional[str] = Field(None, max_length=128)
+    event_source_ts: str = Field(..., description="ISO 8601 source timestamp")
+    ingested_ts: Optional[str] = Field(None, description="ISO 8601 ingest timestamp")
+    processed_ts: Optional[str] = Field(None, description="ISO 8601 processing timestamp")
+    data_classification: Optional[Literal["public", "internal", "confidential", "restricted"]] = None
+    pii_present: Optional[bool] = False
+    enterprise_context: EnterpriseContext
+    actor_context: ActorContext
+    source_signature: SourceSignature
+    normalized_event: NormalizedEvent
+    metrics_payload: Optional[MetricsPayload] = None
+    event_payload: Optional[Dict[str, Any]] = None
+    log_payload: Optional[Dict[str, Any]] = None
+
+
+class IngestEnvelopeResult(BaseModel):
+    status: Literal["ingested", "quarantined"]
+    reason_code: Optional[str] = None
+    event_id: str
+    idempotency_key: str
+    tenant_key: str
+    observed_event_id: Optional[str] = None
+    observed_metric_resource_id: Optional[str] = None
+
+
 class SystemHealth(BaseModel):
     """System health status."""
     status: str  # NORMAL, DEGRADED, CRITICAL
@@ -107,6 +184,11 @@ class SystemHealth(BaseModel):
     active_risks: int
     last_cycle: Optional[str]
     message: str
+    # Frontend compatibility fields
+    active_workflows: int = 0
+    total_events: int = 0
+    risk_level: str = "NORMAL"
+    last_update: str = ""
 
 
 class SignalsSummary(BaseModel):
@@ -122,12 +204,16 @@ class InsightResponse(BaseModel):
     summary: str
     why_it_matters: str
     what_will_happen_if_ignored: str
+    # Frontend compatibility alias
+    what_happens_if_ignored: str
     recommended_actions: List[str]
     confidence: float
     uncertainty: str
     severity: str
     timestamp: str
     evidence_count: int
+    # Frontend expects evidence IDs list
+    evidence_ids: List[str]
     cycle_id: str
 
 
@@ -146,18 +232,26 @@ class PolicyResponse(BaseModel):
     """Policy definition response."""
     policy_id: str
     name: str
+    condition: str
     severity: str
     rationale: str
 
 
 class ViolationResponse(BaseModel):
     """Policy violation response."""
+    violation_id: str
     hit_id: str
     policy_id: str
+    policy_name: str
     event_id: str
+    type: str
     violation_type: str
+    severity: str
+    status: str
+    details: str
     description: str
     timestamp: str
+    workflow_id: Optional[str] = None
 
 
 class WorkflowResponse(BaseModel):
@@ -167,6 +261,12 @@ class WorkflowResponse(BaseModel):
     status: str
     steps_completed: int
     total_steps: int
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    environment: Optional[str] = None
+    context_tag: Optional[str] = None
+    input_source: Optional[str] = None
+    issue_category: Optional[str] = None
 
 
 class CausalLinkResponse(BaseModel):
@@ -191,9 +291,51 @@ _master: Optional[MasterAgent] = None
 _explanation: Optional[ExplanationEngine] = None
 _insights: List[Insight] = []
 _cycle_results: List[CycleResult] = []
+_slack_notifier: Optional[SlackNotifier] = None
 _running = False
 _reasoning_task: Optional[asyncio.Task] = None
 _startup_time: Optional[datetime] = None
+_ingest_idempotency_seen: Dict[str, str] = {}
+_ingest_dlq: List[Dict[str, Any]] = []
+_max_ingest_dlq = 1000
+_max_idempotency_keys = 50000
+
+
+def _parse_iso8601(ts: str) -> datetime:
+    cleaned = ts.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(cleaned)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _tenant_key(ctx: EnterpriseContext) -> str:
+    return f"{ctx.organization_id}:{ctx.project_id}:{ctx.environment}"
+
+
+def _quarantine_envelope(
+    envelope: UnifiedTelemetryEnvelope,
+    reason_code: str,
+    details: Optional[str] = None,
+) -> IngestEnvelopeResult:
+    entry = {
+        "event_id": envelope.event_id,
+        "idempotency_key": envelope.idempotency_key,
+        "reason_code": reason_code,
+        "details": details or "",
+        "tenant_key": _tenant_key(envelope.enterprise_context),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    _ingest_dlq.append(entry)
+    if len(_ingest_dlq) > _max_ingest_dlq:
+        del _ingest_dlq[: len(_ingest_dlq) - _max_ingest_dlq]
+    return IngestEnvelopeResult(
+        status="quarantined",
+        reason_code=reason_code,
+        event_id=envelope.event_id,
+        idempotency_key=envelope.idempotency_key,
+        tenant_key=entry["tenant_key"],
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -241,7 +383,8 @@ async def run_reasoning_loop():
             if _state._completed_cycles:
                 latest_cycle = _state._completed_cycles[-1]
                 risk_tracker = get_risk_tracker()
-                risk_tracker.record_cycle(latest_cycle)
+                risk_point = risk_tracker.record_cycle(latest_cycle)
+                insight = None
 
                 # 5. Explanation engine generates insight
                 insight = _explanation.generate_insight(latest_cycle)
@@ -268,6 +411,18 @@ async def run_reasoning_loop():
                         )
                     except Exception:
                         pass
+
+                # 6. Optional Slack alerting for high-priority cycles
+                if _slack_notifier:
+                    try:
+                        await _slack_notifier.send_cycle_alert(
+                            latest_cycle,
+                            insight=insight,
+                            risk_score=risk_point.risk_score if risk_point else None,
+                            risk_state=risk_point.risk_state if risk_point else None,
+                        )
+                    except Exception as e:
+                        cycle_logger.warning("Slack alert failed: %s", e)
 
             cycle_logger.debug(
                 f"Cycle {result.cycle_id}: "
@@ -308,7 +463,7 @@ async def lifespan(app: FastAPI):
     2. Cancel background task
     3. Wait for clean exit
     """
-    global _simulation, _observation, _state, _master, _explanation
+    global _simulation, _observation, _state, _master, _explanation, _slack_notifier
     global _running, _reasoning_task, _startup_time
 
     _startup_time = datetime.utcnow()
@@ -332,12 +487,26 @@ async def lifespan(app: FastAPI):
     _state = get_shared_state()
     _master = MasterAgent(_observation, _state)
     _explanation = ExplanationEngine(use_llm=settings.ENABLE_CREWAI)
+    _slack_notifier = SlackNotifier(
+        SlackConfig(
+            enabled=settings.ENABLE_SLACK_ALERTS,
+            webhook_url=settings.SLACK_WEBHOOK_URL,
+            min_severity=settings.SLACK_ALERT_MIN_SEVERITY,
+            min_risk_state=settings.SLACK_ALERT_MIN_RISK_STATE,
+            cooldown_seconds=settings.SLACK_ALERT_COOLDOWN_SECONDS,
+            frontend_base_url=settings.FRONTEND_BASE_URL,
+        )
+    )
 
     logger.info("  Simulation Engine ......... ready")
     logger.info("  Observation Layer ......... ready")
     logger.info("  Shared State (Blackboard) . ready")
     logger.info("  MCP (Master Agent) ........ ready")
     logger.info("  Explanation Engine ........ ready")
+    logger.info(
+        "  Slack Alerts .............. %s",
+        "enabled" if _slack_notifier.enabled else "disabled",
+    )
 
     # ── Database Initialization ──
     from db import get_sqlite_store
@@ -460,6 +629,280 @@ async def generic_exception_handler(request: Request, exc: Exception):
 # OBSERVATION ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@app.post("/ingest/envelope", response_model=IngestEnvelopeResult, tags=["Observation"])
+async def ingest_envelope(envelope: UnifiedTelemetryEnvelope):
+    """
+    Ingest enterprise telemetry envelope with strict context validation.
+
+    Accepted:
+    - Valid schema + required context + acceptable time skew + unique idempotency key
+
+    Quarantined (DLQ):
+    - Duplicate idempotency key
+    - Invalid/late timestamp
+    - Unknown schema
+    - Missing category-specific payload
+    """
+    # Version gate (start strict at v1.x)
+    if not envelope.schema_version.startswith("v1"):
+        return _quarantine_envelope(
+            envelope,
+            reason_code="SCHEMA_INVALID",
+            details=f"Unsupported schema_version={envelope.schema_version}",
+        )
+
+    # Idempotency gate
+    if envelope.idempotency_key in _ingest_idempotency_seen:
+        return _quarantine_envelope(
+            envelope,
+            reason_code="DUPLICATE",
+            details="idempotency_key already seen",
+        )
+
+    # Time skew gate
+    try:
+        src_ts = _parse_iso8601(envelope.event_source_ts)
+    except Exception:
+        return _quarantine_envelope(
+            envelope,
+            reason_code="SCHEMA_INVALID",
+            details="event_source_ts is not valid ISO 8601",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    skew_seconds = abs((now_utc - src_ts).total_seconds())
+    # 24h hard guard for late/future events in this initial implementation.
+    if skew_seconds > 86400:
+        return _quarantine_envelope(
+            envelope,
+            reason_code="LATE_EVENT",
+            details=f"timestamp skew {int(skew_seconds)}s exceeds 86400s",
+        )
+
+    # Category-specific payload gate
+    if envelope.normalized_event.event_category == "infrastructure" and not envelope.metrics_payload:
+        return _quarantine_envelope(
+            envelope,
+            reason_code="SCHEMA_INVALID",
+            details="metrics_payload required for infrastructure category",
+        )
+
+    global _observation
+    if _observation is None:
+        _observation = get_observation_layer()
+
+    tenant_key = _tenant_key(envelope.enterprise_context)
+    observed_event = _observation.observe_event({
+        "event_id": envelope.event_id,
+        "type": envelope.normalized_event.event_type,
+        "workflow_id": envelope.enterprise_context.workflow_id,
+        "actor": envelope.actor_context.actor_id,
+        "resource": envelope.enterprise_context.service_name,
+        "timestamp": src_ts.isoformat(),
+        "metadata": {
+            "schema_version": envelope.schema_version,
+            "trace_id": envelope.trace_id,
+            "span_id": envelope.span_id,
+            "parent_span_id": envelope.parent_span_id,
+            "idempotency_key": envelope.idempotency_key,
+            "tenant_key": tenant_key,
+            "enterprise_context": envelope.enterprise_context.model_dump(),
+            "actor_context": envelope.actor_context.model_dump(),
+            "source_signature": envelope.source_signature.model_dump(),
+            "normalized_event": envelope.normalized_event.model_dump(),
+            "data_classification": envelope.data_classification,
+            "pii_present": envelope.pii_present,
+            "event_payload": envelope.event_payload or {},
+            "log_payload": envelope.log_payload or {},
+        },
+    })
+
+    observed_metric_resource_id = None
+    if envelope.metrics_payload:
+        observed_metric = _observation.observe_metric({
+            "resource_id": envelope.source_signature.source_host or envelope.enterprise_context.service_name,
+            "metric": envelope.metrics_payload.metric_name,
+            "value": envelope.metrics_payload.metric_value,
+            "timestamp": src_ts.isoformat(),
+        })
+        observed_metric_resource_id = observed_metric.resource_id
+
+    _ingest_idempotency_seen[envelope.idempotency_key] = envelope.event_id
+    if len(_ingest_idempotency_seen) > _max_idempotency_keys:
+        # bounded memory; remove oldest inserted key
+        first_key = next(iter(_ingest_idempotency_seen.keys()))
+        _ingest_idempotency_seen.pop(first_key, None)
+
+    return IngestEnvelopeResult(
+        status="ingested",
+        event_id=envelope.event_id,
+        idempotency_key=envelope.idempotency_key,
+        tenant_key=tenant_key,
+        observed_event_id=observed_event.event_id,
+        observed_metric_resource_id=observed_metric_resource_id,
+    )
+
+@app.post("/ingest/github/webhook", tags=["Observation"])
+async def ingest_github_webhook(request: Request):
+    """
+    Ingest GitHub webhook events (PR/review/merge/GitHub Actions) as raw observation facts.
+
+    This is the bridge for pre-deploy prediction:
+    GitHub PR/CI events become evidence nodes that can be correlated to a deployment_id.
+
+    Security note:
+    - Signature verification is not implemented in this hackathon build.
+    - Do NOT expose this endpoint publicly without validating `X-Hub-Signature-256`.
+    """
+    global _observation
+    if _observation is None:
+        _observation = get_observation_layer()
+
+    payload = await request.json()
+    gh_event = request.headers.get("X-GitHub-Event", "unknown")
+    delivery_id = request.headers.get("X-GitHub-Delivery", "")
+
+    # Minimal extraction helpers (be liberal in what we accept).
+    repo = payload.get("repository", {}) if isinstance(payload, dict) else {}
+    repo_full = repo.get("full_name") or repo.get("name") or "unknown/repo"
+
+    sender = payload.get("sender", {}) if isinstance(payload, dict) else {}
+    sender_login = sender.get("login") or "github_user"
+
+    pr = payload.get("pull_request", {}) if isinstance(payload, dict) else {}
+    pr_number = pr.get("number") or payload.get("number") or payload.get("pull_request", {}).get("number") if isinstance(payload, dict) else None
+    pr_title = pr.get("title") or ""
+    pr_state = pr.get("state") or ""
+    pr_merged = bool(pr.get("merged")) if isinstance(pr, dict) else False
+
+    # GitHub Actions workflow_run event
+    workflow_run = payload.get("workflow_run", {}) if isinstance(payload, dict) else {}
+    run_id = workflow_run.get("id")
+    run_name = workflow_run.get("name") or workflow_run.get("workflow_name") or ""
+    run_conclusion = workflow_run.get("conclusion") or workflow_run.get("status") or ""
+    head_sha = (
+        workflow_run.get("head_sha")
+        or (payload.get("after") if isinstance(payload, dict) else None)
+        or (pr.get("head", {}).get("sha") if isinstance(pr, dict) else None)
+    )
+
+    # Correlation key:
+    # Use an explicit deployment_id if present (for demos), else derive from repo+sha.
+    # This makes PR/CI nodes show up in the same workflow timeline (deployment workflow) deterministically.
+    deployment_id = None
+    if isinstance(payload, dict):
+        deployment_id = payload.get("deployment_id") or payload.get("deployment", {}).get("id")
+    if not deployment_id and head_sha:
+        deployment_id = f"deploy_{hashlib.sha256(f'{repo_full}:{head_sha}'.encode()).hexdigest()[:10]}"
+    if not deployment_id:
+        deployment_id = "deploy_unknown"
+
+    # Map GitHub webhook to normalized event type.
+    action = payload.get("action") if isinstance(payload, dict) else None
+    event_type = f"GITHUB_{gh_event}".upper()
+    if gh_event == "pull_request" and action:
+        event_type = f"PR_{str(action).upper()}"
+    elif gh_event == "pull_request_review" and action:
+        event_type = f"PR_REVIEW_{str(action).upper()}"
+    elif gh_event == "workflow_run" and action:
+        event_type = f"CI_{str(action).upper()}"
+
+    # In this demo, we correlate GitHub events to the deployment workflow type.
+    # A real implementation would look up the concrete workflow instance created by the pipeline.
+    workflow_id = "wf_deployment_03"
+
+    # Deterministic event id for idempotency across retries (delivery id wins).
+    dedupe_basis = delivery_id or f"{gh_event}:{action}:{repo_full}:{pr_number}:{run_id}:{head_sha}"
+    event_id = f"evt_{hashlib.sha256(dedupe_basis.encode()).hexdigest()[:16]}"
+    ts = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+
+    enterprise_context = {
+        "organization_id": "org_001",
+        "business_unit": "platform",
+        "project_id": "proj_platform_release",
+        "project_name": "Platform Release Engineering",
+        "environment": "production",
+        "region": "us-east-1",
+        "service_name": "payment-api" if "payment" in str(repo_full).lower() else "deploy-orchestrator",
+        "service_type": "backend",
+        "repository": f"github://{repo_full}",
+        "deployment_id": str(deployment_id),
+        "workflow_id": workflow_id,
+        "workflow_version": "v1.0.0",
+    }
+
+    actor_context = {
+        "actor_id": str(sender_login),
+        "actor_type": "human" if sender_login and sender_login != "github-actions[bot]" else "automation",
+        "role": "SDE",
+        "team": "platform_engineering",
+        "access_level": "write",
+        "authentication_method": "SSO",
+    }
+
+    normalized_event = {
+        "event_category": "code" if gh_event in ("pull_request", "pull_request_review") else "cicd",
+        "event_type": event_type,
+        "severity": "info" if not pr_merged and run_conclusion not in ("failure", "cancelled") else "warning",
+        "confidence_initial": 0.95,
+    }
+
+    observed = _observation.observe_event({
+        "event_id": event_id,
+        "type": event_type,
+        "workflow_id": workflow_id,
+        "actor": str(sender_login),
+        "resource": enterprise_context["service_name"],
+        "timestamp": ts,
+        "metadata": {
+            "trace_id": f"trace_{deployment_id}",
+            "enterprise_context": enterprise_context,
+            "actor_context": actor_context,
+            "source_signature": {
+                "tool_name": "github",
+                "tool_type": "webhook",
+                "source_host": "github.com",
+            },
+            "normalized_event": normalized_event,
+            "event_payload": payload,
+            "github": {
+                "event": gh_event,
+                "action": action,
+                "delivery": delivery_id,
+                "repo": repo_full,
+                "pr_number": pr_number,
+                "pr_title": pr_title,
+                "pr_state": pr_state,
+                "pr_merged": pr_merged,
+                "workflow_run_id": run_id,
+                "workflow_name": run_name,
+                "workflow_conclusion": run_conclusion,
+                "head_sha": head_sha,
+                "deployment_id": deployment_id,
+            },
+        },
+    })
+
+    return {
+        "status": "observed",
+        "event_id": observed.event_id,
+        "workflow_id": workflow_id,
+        "deployment_id": deployment_id,
+        "github_event": gh_event,
+        "type": event_type,
+    }
+
+
+@app.get("/ingest/status", tags=["Observation"])
+async def get_ingest_status():
+    """Operational visibility for ingestion contract and quarantine queue."""
+    return {
+        "schema_version_supported": "v1.x",
+        "idempotency_keys_in_memory": len(_ingest_idempotency_seen),
+        "dlq_size": len(_ingest_dlq),
+        "latest_dlq": _ingest_dlq[-20:],
+    }
+
 @app.post("/observe/event", tags=["Observation"])
 async def observe_event(event: EventInput):
     """Ingest a raw event into the observation layer."""
@@ -523,13 +966,33 @@ async def get_system_health():
         status = "NORMAL"
         message = "System operating normally."
     
+    active_workflows = len(getattr(_simulation, "_active_workflows", {})) if _simulation else 0
+    total_events = len(_observation.get_recent_events(10000)) if _observation else 0
+    risk_level = "NORMAL"
+    if risks:
+        projected = max(
+            risks,
+            key=lambda r: {
+                RiskState.NORMAL: 0,
+                RiskState.DEGRADED: 1,
+                RiskState.AT_RISK: 2,
+                RiskState.VIOLATION: 3,
+                RiskState.INCIDENT: 4,
+            }.get(r.projected_state, 0),
+        )
+        risk_level = projected.projected_state.value
+
     return SystemHealth(
         status=status,
         active_anomalies=len(anomalies),
         active_violations=len(violations),
         active_risks=len(risks),
         last_cycle=_cycle_results[-1].cycle_id if _cycle_results else None,
-        message=message
+        message=message,
+        active_workflows=active_workflows,
+        total_events=total_events,
+        risk_level=risk_level,
+        last_update=datetime.utcnow().isoformat(),
     )
 
 
@@ -584,21 +1047,28 @@ async def get_signals_summary():
 async def get_insights(limit: int = Query(default=10, ge=1, le=100, description="Max insights to return")):
     """Get recent insights generated by the Explanation Engine."""
     recent = _insights[-limit:] if _insights else []
+    cycle_map = {c.cycle_id: c for c in _state._completed_cycles[-200:]} if _state else {}
     return {
         "insights": [
-            InsightResponse(
+            (lambda cycle: InsightResponse(
                 insight_id=i.insight_id,
                 summary=i.summary,
                 why_it_matters=i.why_it_matters,
                 what_will_happen_if_ignored=i.what_will_happen_if_ignored,
+                what_happens_if_ignored=i.what_will_happen_if_ignored,
                 recommended_actions=i.recommended_actions,
                 confidence=i.confidence,
                 uncertainty=i.uncertainty,
                 severity=i.severity,
                 timestamp=i.timestamp.isoformat(),
                 evidence_count=i.evidence_count,
+                evidence_ids=(
+                    [a.anomaly_id for a in cycle.anomalies] +
+                    [h.hit_id for h in cycle.policy_hits] +
+                    [c.link_id for c in cycle.causal_links]
+                )[:20] if cycle else [],
                 cycle_id=i.cycle_id
-            ).model_dump()
+            ).model_dump())(cycle_map.get(i.cycle_id))
             for i in reversed(recent)
         ]
     }
@@ -622,12 +1092,18 @@ async def get_insight(insight_id: str):
                     summary=insight.summary,
                     why_it_matters=insight.why_it_matters,
                     what_will_happen_if_ignored=insight.what_will_happen_if_ignored,
+                    what_happens_if_ignored=insight.what_will_happen_if_ignored,
                     recommended_actions=insight.recommended_actions,
                     confidence=insight.confidence,
                     uncertainty=insight.uncertainty,
                     severity=insight.severity,
                     timestamp=insight.timestamp.isoformat(),
                     evidence_count=insight.evidence_count,
+                    evidence_ids=[
+                        *[a.anomaly_id for a in (cycle.anomalies if cycle else [])],
+                        *[h.hit_id for h in (cycle.policy_hits if cycle else [])],
+                        *[c.link_id for c in (cycle.causal_links if cycle else [])],
+                    ][:20],
                     cycle_id=insight.cycle_id
                 ).model_dump(),
                 "causal_links": [
@@ -692,6 +1168,7 @@ async def get_policies():
             PolicyResponse(
                 policy_id=p.policy_id,
                 name=p.name,
+                condition=getattr(p.check, "__name__", "rule_check").replace("_check_", "").replace("_", " ").upper(),
                 severity=p.severity,
                 rationale=p.rationale
             ).model_dump()
@@ -703,17 +1180,27 @@ async def get_policies():
 @app.get("/policy/violations", tags=["Compliance"])
 async def get_policy_violations(limit: int = Query(default=50, ge=1, le=500)):
     """Get detected policy violations from recent cycles."""
+    from agents.compliance_agent import POLICIES
+    policy_map = {p.policy_id: p for p in POLICIES}
     all_violations = []
     
     for cycle in _state._completed_cycles[-10:]:
         for h in cycle.policy_hits:
+            policy = policy_map.get(h.policy_id)
             all_violations.append(ViolationResponse(
+                violation_id=h.hit_id,
                 hit_id=h.hit_id,
                 policy_id=h.policy_id,
+                policy_name=policy.name if policy else h.policy_id,
                 event_id=h.event_id,
+                type=h.violation_type,
                 violation_type=h.violation_type,
+                severity=policy.severity if policy else "MEDIUM",
+                status="ACTIVE",
+                details=h.description,
                 description=h.description,
-                timestamp=h.timestamp.isoformat()
+                timestamp=h.timestamp.isoformat(),
+                workflow_id=None,
             ))
     
     return {"violations": [v.model_dump() for v in all_violations[-limit:]]}
@@ -726,17 +1213,111 @@ async def get_policy_violations(limit: int = Query(default=50, ge=1, le=500)):
 @app.get("/workflows", tags=["Workflows"])
 async def get_workflows():
     """Get tracked workflows with step completion status."""
+    from agents.workflow_agent import WORKFLOW_DEFINITIONS
     workflows = _master._workflow_agent.get_tracked_workflows()
-    
+
+    def _classify_input_source(tool_name: str, tool_type: str) -> str:
+        source = f"{tool_name} {tool_type}".lower()
+        if "github" in source or "git" in source:
+            return "github"
+        if "webhook" in source or "browser" in source or "frontend" in source or "client" in source:
+            return "client_side"
+        if any(k in source for k in ("datadog", "grafana", "prometheus", "k8s", "docker", "infra")):
+            return "server_failure"
+        if any(k in source for k in ("ci", "cicd", "jenkins", "deploy")):
+            return "deployment_pipeline"
+        return "system_internal"
+
+    def _classify_issue(event_type: str, event_category: str) -> str:
+        sig = f"{event_type} {event_category}".lower()
+        if any(k in sig for k in ("exception", "traceback", "bug", "syntax", "code", "runtime")):
+            return "code_error_or_bug"
+        if any(k in sig for k in ("timeout", "latency", "cpu", "memory", "resource", "network")):
+            return "server_failure"
+        if any(k in sig for k in ("policy", "access", "compliance", "security", "leak", "pii")):
+            return "compliance_or_data_risk"
+        if any(k in sig for k in ("ui", "client", "browser", "frontend")):
+            return "client_side_error"
+        return "workflow_anomaly"
+
+    # Try to enrich workflow context from recent observed events.
+    workflow_context: Dict[str, Dict[str, str]] = {}
+    recent_events = _observation.get_recent_events(500) if _observation else []
+    for e in recent_events:
+        if not e.workflow_id or e.workflow_id in workflow_context:
+            continue
+        ctx = e.metadata.get("enterprise_context", {}) if isinstance(e.metadata, dict) else {}
+        source_sig = e.metadata.get("source_signature", {}) if isinstance(e.metadata, dict) else {}
+        normalized = e.metadata.get("normalized_event", {}) if isinstance(e.metadata, dict) else {}
+        tool_name = str(source_sig.get("tool_name", ""))
+        tool_type = str(source_sig.get("tool_type", ""))
+        event_type = str(normalized.get("event_type", e.type))
+        event_category = str(normalized.get("event_category", ""))
+        if isinstance(ctx, dict) and ctx:
+            workflow_context[e.workflow_id] = {
+                "project_id": str(ctx.get("project_id", "")),
+                "project_name": str(ctx.get("project_name", "")),
+                "environment": str(ctx.get("environment", "")),
+                "input_source": _classify_input_source(tool_name, tool_type),
+                "issue_category": _classify_issue(event_type, event_category),
+            }
+
+    default_context = {
+        "wf_deployment": {
+            "project_id": "proj_platform_release",
+            "project_name": "Platform Release Engineering",
+            "environment": "production",
+            "context_tag": "deployment_workflow",
+            "input_source": "github",
+            "issue_category": "deployment_pipeline",
+        },
+        "wf_onboarding": {
+            "project_id": "proj_customer_onboarding",
+            "project_name": "Customer Onboarding Platform",
+            "environment": "production",
+            "context_tag": "new_update",
+            "input_source": "client_side",
+            "issue_category": "client_side_error",
+        },
+        "wf_expense": {
+            "project_id": "proj_finops",
+            "project_name": "Finance Operations",
+            "environment": "staging",
+            "context_tag": "approval_workflow",
+            "input_source": "server_failure",
+            "issue_category": "workflow_anomaly",
+        },
+        "wf_access": {
+            "project_id": "proj_identity_security",
+            "project_name": "Identity & Access Management",
+            "environment": "production",
+            "context_tag": "error_clear",
+            "input_source": "server_failure",
+            "issue_category": "compliance_or_data_risk",
+        },
+    }
+
     return {
         "workflows": [
-            WorkflowResponse(
-                id=wf.workflow_id,
-                name=wf.workflow_type,
-                status="active" if not wf.skipped_steps else "degraded",
-                steps_completed=len(wf.completed_steps),
-                total_steps=wf.current_step_index + 1
-            ).model_dump()
+            (lambda wf: (
+                (lambda wf_type, defn, ctx: WorkflowResponse(
+                    id=wf.workflow_id,
+                    name=(defn.get("name") if defn else wf.workflow_type).replace("_", " "),
+                    status="degraded" if wf.skipped_steps else ("active" if wf.current_step_index > 0 else "pending"),
+                    steps_completed=len(wf.completed_steps),
+                    total_steps=max(wf.current_step_index + 1, 1),
+                    project_id=ctx.get("project_id") or default_context.get(wf_type, {}).get("project_id"),
+                    project_name=ctx.get("project_name") or default_context.get(wf_type, {}).get("project_name"),
+                    environment=ctx.get("environment") or default_context.get(wf_type, {}).get("environment") or settings.ENVIRONMENT,
+                    context_tag=default_context.get(wf_type, {}).get("context_tag"),
+                    input_source=ctx.get("input_source") or default_context.get(wf_type, {}).get("input_source") or "system_internal",
+                    issue_category=ctx.get("issue_category") or default_context.get(wf_type, {}).get("issue_category") or "workflow_anomaly",
+                ).model_dump())(
+                    wf.workflow_type,
+                    WORKFLOW_DEFINITIONS.get(wf.workflow_type, {}),
+                    workflow_context.get(wf.workflow_id, {}),
+                )
+            ))(wf)
             for wf in workflows.values()
         ]
     }
@@ -817,6 +1398,9 @@ async def get_workflow_timeline(workflow_id: str):
     - compliance: Policy checks and violations
     """
     from agents.workflow_agent import WORKFLOW_DEFINITIONS
+    global _observation
+    if _observation is None:
+        _observation = get_observation_layer()
     
     # Extract workflow type prefix
     wf_type = None
@@ -829,15 +1413,151 @@ async def get_workflow_timeline(workflow_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown workflow type for {workflow_id}")
     
     definition = WORKFLOW_DEFINITIONS[wf_type]
-    
+
+    # Default enterprise context (used when events don't contain the unified envelope metadata yet).
+    default_context = {
+        "wf_deployment": {
+            "enterprise_context": {
+                "organization_id": "org_001",
+                "business_unit": "platform",
+                "project_id": "proj_platform_release",
+                "project_name": "Platform Release Engineering",
+                "environment": "production",
+                "region": "us-east-1",
+                "service_name": "deploy-orchestrator",
+                "service_type": "automation",
+                "repository": "github://org/platform-release",
+                "deployment_id": "deploy_demo_001",
+                "workflow_id": workflow_id,
+                "workflow_version": "v1.0.0",
+            },
+            "actor_context": {
+                "actor_id": "svc_cicd",
+                "actor_type": "automation",
+                "role": "DevOps",
+                "team": "platform_engineering",
+                "access_level": "write",
+                "authentication_method": "SERVICE_ACCOUNT",
+            },
+            "source_signature": {
+                "tool_name": "github",
+                "tool_type": "webhook",
+                "source_host": "github.com",
+            },
+        },
+        "wf_onboarding": {
+            "enterprise_context": {
+                "organization_id": "org_001",
+                "business_unit": "customer",
+                "project_id": "proj_customer_onboarding",
+                "project_name": "Customer Onboarding Platform",
+                "environment": "production",
+                "region": "us-east-1",
+                "service_name": "onboarding-api",
+                "service_type": "backend",
+                "repository": "github://org/onboarding",
+                "deployment_id": None,
+                "workflow_id": workflow_id,
+                "workflow_version": "v3.2.1",
+            },
+            "actor_context": {
+                "actor_id": "user_7841",
+                "actor_type": "human",
+                "role": "SDE",
+                "team": "onboarding_engineering",
+                "access_level": "read",
+                "authentication_method": "SSO",
+            },
+            "source_signature": {
+                "tool_name": "frontend",
+                "tool_type": "client",
+                "source_host": "web",
+            },
+        },
+        "wf_expense": {
+            "enterprise_context": {
+                "organization_id": "org_001",
+                "business_unit": "finance",
+                "project_id": "proj_finops",
+                "project_name": "Finance Operations",
+                "environment": "staging",
+                "region": "us-east-1",
+                "service_name": "expense-approvals",
+                "service_type": "backend",
+                "repository": "github://org/finops",
+                "deployment_id": None,
+                "workflow_id": workflow_id,
+                "workflow_version": "v2.0.0",
+            },
+            "actor_context": {
+                "actor_id": "svc_finops_bot",
+                "actor_type": "service",
+                "role": "Manager",
+                "team": "finops",
+                "access_level": "write",
+                "authentication_method": "API_TOKEN",
+            },
+            "source_signature": {
+                "tool_name": "webhook",
+                "tool_type": "server",
+                "source_host": "expense-approvals",
+            },
+        },
+        "wf_access": {
+            "enterprise_context": {
+                "organization_id": "org_001",
+                "business_unit": "security",
+                "project_id": "proj_identity_security",
+                "project_name": "Identity & Access Management",
+                "environment": "production",
+                "region": "us-east-1",
+                "service_name": "iam-api",
+                "service_type": "backend",
+                "repository": "github://org/iam",
+                "deployment_id": None,
+                "workflow_id": workflow_id,
+                "workflow_version": "v1.8.0",
+            },
+            "actor_context": {
+                "actor_id": "svc_iam_bot",
+                "actor_type": "service",
+                "role": "Security",
+                "team": "security",
+                "access_level": "admin",
+                "authentication_method": "SERVICE_ACCOUNT",
+            },
+            "source_signature": {
+                "tool_name": "k8s_audit",
+                "tool_type": "logs",
+                "source_host": "kube-apiserver",
+            },
+        },
+    }.get(wf_type, {})
+
     # Collect all events related to this workflow
     all_events = _observation.get_recent_events(count=500)
-    wf_events = [e for e in all_events if e.workflow_id and e.workflow_id.startswith(wf_type)]
-    
+    wf_events = [e for e in all_events if e.workflow_id == workflow_id]
+    # Correlate cross-source events via deployment_id when possible.
+    corr_deploy_id = None
+    for e in wf_events:
+        md = e.metadata if isinstance(e.metadata, dict) else {}
+        ctx = md.get("enterprise_context", {}) if isinstance(md, dict) else {}
+        if isinstance(ctx, dict) and ctx.get("deployment_id"):
+            corr_deploy_id = str(ctx.get("deployment_id"))
+            break
+    if not corr_deploy_id:
+        corr_deploy_id = str(default_context.get("enterprise_context", {}).get("deployment_id") or "")
+    corr_trace_id = f"trace_{corr_deploy_id}" if corr_deploy_id else f"trace_{workflow_id}"
+
+    def _to_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
     # Build timeline nodes
     nodes = []
-    now = datetime.utcnow()
-    base_time = now - timedelta(minutes=10)
+    now = datetime.now(timezone.utc)
+    base_time = min((_to_utc(e.timestamp) for e in wf_events), default=now - timedelta(minutes=10))
     
     # Workflow lane: use real events if available, else generate from definition
     if wf_events:
@@ -864,8 +1584,8 @@ async def get_workflow_timeline(workflow_id: str):
                 "laneId": lane,
                 "name": e.metadata.get("step", e.type).upper(),
                 "status": status,
-                "timestamp": e.timestamp.isoformat(),
-                "timestampMs": int(e.timestamp.timestamp() * 1000),
+                "timestamp": _to_utc(e.timestamp).isoformat(),
+                "timestampMs": int(_to_utc(e.timestamp).timestamp() * 1000),
                 "durationMs": int(duration * 1000) if duration else None,
                 "confidence": confidence,
                 "details": e.metadata,
@@ -905,19 +1625,189 @@ async def get_workflow_timeline(workflow_id: str):
                     "expected_duration": f"{sla}s",
                     "actual_duration": f"{int(actual_duration)}s",
                     "sla_risk": actual_duration > sla,
+                    # Enterprise context (demo realism)
+                    "enterprise_context": default_context.get("enterprise_context", {}),
+                    "actor_context": default_context.get("actor_context", {}),
+                    "source_signature": default_context.get("source_signature", {}),
+                    "normalized_event": {
+                        "event_category": "workflow",
+                        "event_type": f"workflow_step_{status}",
+                        "severity": "warning" if status in ("delayed", "warning") else ("critical" if status == "failed" else "info"),
+                        "confidence_initial": round(confidence / 100, 2),
+                    },
+                    "trace_id": f"trace_{workflow_id}",
+                    "tenant_key": f"{default_context.get('enterprise_context', {}).get('organization_id','org_001')}:{default_context.get('enterprise_context', {}).get('project_id','proj_unknown')}:{default_context.get('enterprise_context', {}).get('environment','production')}",
                 },
                 "agentSource": "WorkflowAgent",
                 "dependsOn": [f"evt_{workflow_id}_{definition['steps'][i-1]}"] if i > 0 else [],
             })
+
+    # Code/CI lane: show PR + review + CI signals that correlate to this deployment.
+    code_nodes = []
+    if corr_deploy_id:
+        for e in all_events:
+            md = e.metadata if isinstance(e.metadata, dict) else {}
+            ctx = md.get("enterprise_context", {}) if isinstance(md, dict) else {}
+            if not (isinstance(ctx, dict) and str(ctx.get("deployment_id", "")) == corr_deploy_id):
+                continue
+            if not (isinstance(md, dict) and isinstance(md.get("source_signature", {}), dict)):
+                continue
+            sig = md.get("source_signature", {})
+            if isinstance(sig, dict) and str(sig.get("tool_name", "")).lower() != "github":
+                continue
+            # Limit to code/cicd event types to keep the lane clean.
+            if not (e.type.startswith("PR_") or e.type.startswith("CI_") or e.type.startswith("GITHUB_")):
+                continue
+
+            label = e.type
+            gh = md.get("github", {}) if isinstance(md, dict) else {}
+            if isinstance(gh, dict) and gh.get("pr_number"):
+                label = f"PR #{gh.get('pr_number')} {str(gh.get('action') or '').upper()}".strip()
+            elif isinstance(gh, dict) and gh.get("workflow_name"):
+                label = f"CI {gh.get('workflow_name')}".strip()
+
+            status = "success"
+            confidence = 92
+            normalized = md.get("normalized_event", {}) if isinstance(md, dict) else {}
+            sev = str(normalized.get("severity", "info")).lower() if isinstance(normalized, dict) else "info"
+            if sev in ("warning", "high", "critical"):
+                status = "warning"
+                confidence = 70
+
+            code_nodes.append({
+                "id": e.event_id,
+                "laneId": "code",
+                "name": label.upper(),
+                "status": status,
+                "timestamp": _to_utc(e.timestamp).isoformat(),
+                "timestampMs": int(_to_utc(e.timestamp).timestamp() * 1000),
+                "confidence": confidence,
+                "details": {
+                    **(md or {}),
+                    "trace_id": md.get("trace_id") if isinstance(md, dict) else corr_trace_id,
+                },
+                "agentSource": "CodeIngest",
+            })
+
+    # Predictive layer (demo): surface CodeAgent anomalies from the latest completed cycle as timeline nodes.
+    # This keeps frontend demo simple: the timeline itself shows "Risk predicted" entries with evidence.
+    try:
+        state = get_shared_state()
+        if state._completed_cycles:
+            latest = state._completed_cycles[-1]
+            for a in latest.anomalies:
+                if a.agent != "CodeAgent":
+                    continue
+                if corr_deploy_id and corr_deploy_id not in a.description:
+                    # CodeAgent encodes deploy_id into its description; avoid mixing releases.
+                    continue
+                code_nodes.append({
+                    "id": a.anomaly_id,
+                    "laneId": "code",
+                    "name": f"PREDICT: {a.type}".upper(),
+                    "status": "warning" if a.confidence >= 0.6 else "success",
+                    "timestamp": a.timestamp.replace(tzinfo=timezone.utc).isoformat() if a.timestamp.tzinfo is None else a.timestamp.astimezone(timezone.utc).isoformat(),
+                    "timestampMs": int((a.timestamp.replace(tzinfo=timezone.utc) if a.timestamp.tzinfo is None else a.timestamp.astimezone(timezone.utc)).timestamp() * 1000),
+                    "confidence": int(a.confidence * 100),
+                    "details": {
+                        "anomaly_type": a.type,
+                        "confidence": a.confidence,
+                        "evidence": a.evidence,
+                        "description": a.description,
+                        "enterprise_context": default_context.get("enterprise_context", {}),
+                        "source_signature": {"tool_name": "chronos", "tool_type": "agent"},
+                        "normalized_event": {
+                            "event_category": "code",
+                            "event_type": a.type,
+                            "severity": "warning",
+                            "confidence_initial": a.confidence,
+                        },
+                        "trace_id": corr_trace_id,
+                    },
+                    "agentSource": "CodeAgent",
+                })
+    except Exception:
+        pass
+
+    # De-dup code lane nodes by id (webhooks may retry).
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for n in code_nodes:
+        dedup[str(n.get("id"))] = n
+    code_nodes = list(dedup.values())
+
+    nodes.extend(sorted(code_nodes, key=lambda n: n["timestampMs"])[:8])
+
+    # Human lane: show who triggered or intervened (enterprise realism).
+    # Prefer real observed events; otherwise synthesize one for common enterprise flows.
+    human_nodes = []
+    if wf_events:
+        for e in wf_events:
+            md = e.metadata if isinstance(e.metadata, dict) else {}
+            actor_ctx = md.get("actor_context", {}) if isinstance(md, dict) else {}
+            normalized = md.get("normalized_event", {}) if isinstance(md, dict) else {}
+            # Only include explicit human actions (avoid duplicating workflow step events).
+            if isinstance(actor_ctx, dict) and actor_ctx.get("actor_type") == "human":
+                etype = str(normalized.get("event_type", e.type))
+                if any(k in etype.lower() for k in ("manual", "approve", "override", "retry", "rollback")):
+                    human_nodes.append({
+                        "id": f"human_{e.event_id}",
+                        "laneId": "human",
+                        "name": etype.replace("_", " ").upper(),
+                        "status": "warning",
+                "timestamp": _to_utc(e.timestamp).isoformat(),
+                "timestampMs": int(_to_utc(e.timestamp).timestamp() * 1000),
+                        "confidence": 75,
+                        "details": md,
+                        "agentSource": "WorkflowAgent",
+                    })
+    else:
+        # Synthesize a realistic "trigger" event for the workflow type.
+        trigger_name = "GITHUB_DEPLOY_TRIGGER" if wf_type == "wf_deployment" else \
+                      "USER_REQUEST" if wf_type == "wf_onboarding" else \
+                      "APPROVAL_REQUEST" if wf_type == "wf_expense" else \
+                      "ACCESS_REQUEST"
+        human_nodes.append({
+            "id": f"human_{workflow_id}_trigger",
+            "laneId": "human",
+            "name": trigger_name,
+            "status": "success",
+            "timestamp": _to_utc(base_time).isoformat(),
+            "timestampMs": int(_to_utc(base_time).timestamp() * 1000),
+            "confidence": 95,
+            "details": {
+                "action": trigger_name.lower(),
+                "enterprise_context": default_context.get("enterprise_context", {}),
+                "actor_context": default_context.get("actor_context", {}),
+                "source_signature": default_context.get("source_signature", {}),
+                "normalized_event": {
+                    "event_category": "human",
+                    "event_type": trigger_name.lower(),
+                    "severity": "info",
+                    "confidence_initial": 0.95,
+                },
+                "trace_id": f"trace_{workflow_id}",
+            },
+            "agentSource": "WorkflowAgent",
+        })
+
+    nodes.extend(human_nodes[:3])
     
-    # Resource lane: get recent resource anomalies
+    # Resource lane: correlate recent metrics during this workflow window.
+    #
+    # Note: We intentionally include a few "normal" metrics too. In enterprise traces,
+    # the absence/presence of normal metrics is part of the proof (baseline vs spike).
     resource_nodes = []
     recent_metrics = _observation.get_recent_metrics(count=100)
+    # Prefer metrics that fall within the workflow window; fall back to recent.
+    windowed = [m for m in recent_metrics if _to_utc(m.timestamp) >= base_time and _to_utc(m.timestamp) <= now]
+    metric_candidates = (windowed or recent_metrics)[-40:]
+
     seen = set()
-    for m in recent_metrics[-20:]:
-        if m.resource_id in seen:
+    for m in metric_candidates:
+        key = (m.resource_id, m.metric)
+        if key in seen:
             continue
-        seen.add(m.resource_id)
+        seen.add(key)
         status = "success"
         confidence = 90
         if m.metric == "cpu_percent" and m.value > 90:
@@ -932,48 +1822,99 @@ async def get_workflow_timeline(workflow_id: str):
         elif m.metric == "memory_percent" and m.value > 75:
             status = "warning"
             confidence = 68
-        
-        if status != "success":
-            resource_nodes.append({
-                "id": f"res_{m.resource_id}_{m.metric}",
-                "laneId": "resource",
-                "name": f"{m.resource_id} {m.metric.replace('_', ' ')}",
-                "status": status,
-                "timestamp": m.timestamp.isoformat(),
-                "timestampMs": int(m.timestamp.timestamp() * 1000),
-                "confidence": confidence,
-                "details": {
-                    "metric": m.metric,
-                    "value": m.value,
-                    "resource": m.resource_id,
+
+        resource_nodes.append({
+            "id": f"res_{m.resource_id}_{m.metric}_{int(m.timestamp.timestamp())}",
+            "laneId": "resource",
+            "name": f"{m.resource_id} {m.metric.replace('_', ' ')}",
+            "status": status,
+            "timestamp": _to_utc(m.timestamp).isoformat(),
+            "timestampMs": int(_to_utc(m.timestamp).timestamp() * 1000),
+            "confidence": confidence,
+            "details": {
+                "metric": m.metric,
+                "value": m.value,
+                "resource": m.resource_id,
+                # Attach context in demo mode so UI can explain source/actor in details view.
+                "enterprise_context": default_context.get("enterprise_context", {}),
+                "actor_context": default_context.get("actor_context", {}),
+                "source_signature": {
+                    **(default_context.get("source_signature", {}) or {}),
+                    "tool_name": "datadog",
+                    "tool_type": "metrics",
                 },
-                "agentSource": "ResourceAgent",
-            })
+                "normalized_event": {
+                    "event_category": "infrastructure",
+                    "event_type": m.metric,
+                    "severity": "warning" if status in ("warning", "failed") else "info",
+                    "confidence_initial": round(confidence / 100, 2),
+                },
+                "trace_id": f"trace_{workflow_id}",
+            },
+            "agentSource": "ResourceAgent",
+        })
     
-    nodes.extend(resource_nodes[:5])
+    # Keep the timeline readable but dense enough for demos.
+    nodes.extend(resource_nodes[:8])
     
-    # Compliance lane: get recent violations for this workflow
+    # Compliance lane: show policy checks and violations for this workflow.
     compliance_nodes = []
     state = get_shared_state()
+    event_by_id = {e.event_id: e for e in all_events}
     for cycle in state._completed_cycles[-5:]:
         for hit in cycle.policy_hits:
+            ev = event_by_id.get(hit.event_id)
+            if ev and ev.workflow_id != workflow_id:
+                continue
             compliance_nodes.append({
                 "id": hit.hit_id,
                 "laneId": "compliance",
                 "name": hit.policy_id,
                 "status": "failed" if hit.violation_type == "SILENT" else "warning",
-                "timestamp": hit.timestamp.isoformat(),
-                "timestampMs": int(hit.timestamp.timestamp() * 1000),
+                "timestamp": _to_utc(hit.timestamp).isoformat(),
+                "timestampMs": int(_to_utc(hit.timestamp).timestamp() * 1000),
                 "confidence": 8 if hit.violation_type == "SILENT" else 45,
                 "details": {
                     "policy": hit.policy_id,
                     "violation_type": hit.violation_type,
                     "event_id": hit.event_id,
+                    "enterprise_context": (ev.metadata.get("enterprise_context", {}) if ev and isinstance(ev.metadata, dict) else default_context.get("enterprise_context", {})),
+                    "actor_context": (ev.metadata.get("actor_context", {}) if ev and isinstance(ev.metadata, dict) else default_context.get("actor_context", {})),
+                    "source_signature": (ev.metadata.get("source_signature", {}) if ev and isinstance(ev.metadata, dict) else default_context.get("source_signature", {})),
+                    "trace_id": (ev.metadata.get("trace_id") if ev and isinstance(ev.metadata, dict) else f"trace_{workflow_id}"),
                 },
                 "agentSource": "ComplianceAgent",
             })
     
-    nodes.extend(compliance_nodes[:3])
+    # Always include at least one "policy check" for enterprise realism (even when no violations are present).
+    if not compliance_nodes:
+        check_ts = base_time + timedelta(seconds=90)
+        compliance_nodes.append({
+            "id": f"policy_{workflow_id}_approval",
+            "laneId": "compliance",
+            "name": "DEPLOY_APPROVAL" if wf_type == "wf_deployment" else "POLICY_CHECK",
+            "status": "success",
+            "timestamp": check_ts.isoformat(),
+            "timestampMs": int(check_ts.timestamp() * 1000),
+            "confidence": 100,
+            "details": {
+                "policy": "DEPLOY_APPROVAL" if wf_type == "wf_deployment" else "POLICY_CHECK",
+                "result": "PASSED",
+                "enterprise_context": default_context.get("enterprise_context", {}),
+                "actor_context": default_context.get("actor_context", {}),
+                "source_signature": default_context.get("source_signature", {}),
+                "normalized_event": {
+                    "event_category": "compliance",
+                    "event_type": "policy_check_passed",
+                    "severity": "info",
+                    "confidence_initial": 1.0,
+                },
+                "trace_id": f"trace_{workflow_id}",
+            },
+            "agentSource": "ComplianceAgent",
+        })
+
+    nodes.extend(compliance_nodes[:5])
     
     # Calculate overall confidence
     if nodes:
@@ -989,10 +1930,11 @@ async def get_workflow_timeline(workflow_id: str):
         "startTime": int(base_time.timestamp() * 1000),
         "endTime": int(now.timestamp() * 1000),
         "lanes": [
-            {"id": "workflow", "label": "Workflow Steps", "order": 0, "visible": True},
-            {"id": "resource", "label": "Resource Impact", "order": 1, "visible": True},
-            {"id": "human", "label": "Human Actions", "order": 2, "visible": True},
-            {"id": "compliance", "label": "Compliance", "order": 3, "visible": True},
+            {"id": "code", "label": "Code & CI", "order": 0, "visible": True},
+            {"id": "workflow", "label": "Workflow Steps", "order": 1, "visible": True},
+            {"id": "resource", "label": "Resource Impact", "order": 2, "visible": True},
+            {"id": "human", "label": "Human Actions", "order": 3, "visible": True},
+            {"id": "compliance", "label": "Compliance", "order": 4, "visible": True},
         ],
         "outcomeSummary": f"Workflow {definition['name']} — monitoring across {len(nodes)} events",
     }
@@ -1215,11 +2157,30 @@ async def trigger_analysis_cycle():
     result = _master.run_cycle()
     _cycle_results.append(result)
     
+    risk_point = None
+    if _state._completed_cycles:
+        latest = _state._completed_cycles[-1]
+        risk_point = get_risk_tracker().record_cycle(latest)
+
+    insight_generated = False
+    insight = None
     if _state._completed_cycles:
         latest = _state._completed_cycles[-1]
         insight = _explanation.generate_insight(latest)
         if insight:
             _insights.append(insight)
+            insight_generated = True
+
+        if _slack_notifier:
+            try:
+                await _slack_notifier.send_cycle_alert(
+                    latest,
+                    insight=insight,
+                    risk_score=risk_point.risk_score if risk_point else None,
+                    risk_state=risk_point.risk_state if risk_point else None,
+                )
+            except Exception:
+                pass
     
     return {
         "cycle_id": result.cycle_id,
@@ -1228,7 +2189,8 @@ async def trigger_analysis_cycle():
         "risk_signals": result.risk_signal_count,
         "causal_links": result.causal_link_count,
         "recommendations": result.recommendation_count,
-        "duration_ms": result.duration_ms
+        "duration_ms": result.duration_ms,
+        "insight_generated": insight_generated,
     }
 
 
@@ -1299,10 +2261,29 @@ async def get_risk_index(limit: int = Query(default=50, ge=1, le=500)):
     tracker = get_risk_tracker()
     history = tracker.get_history(limit)
     
+    history_data = []
+    for p in history:
+        point = p.to_dict()
+        point["contributions"] = [
+            {
+                "agent": c.get("agent"),
+                "contribution": c.get("impact", 0),
+                "reason": c.get("description", ""),
+                "signal_type": c.get("signal_type"),
+                "evidence_id": c.get("evidence_id"),
+            }
+            for c in point.get("contributions", [])
+        ]
+        history_data.append(point)
+    current = tracker.get_current_risk().to_dict() if tracker.get_current_risk() else None
     return {
-        "data": [p.to_dict() for p in history],
+        # Frontend contract
+        "history": history_data,
+        "current_risk": current["risk_score"] if current else 20,
         "trend": tracker.get_trend(),
-        "current": tracker.get_current_risk().to_dict() if tracker.get_current_risk() else None,
+        # Backward-compatible aliases
+        "data": history_data,
+        "current": current,
         "description": "System Health Index - shows trajectory, not raw metrics"
     }
 
@@ -1335,6 +2316,8 @@ async def get_current_risk():
         "contributions": [
             {
                 "agent": c.agent,
+                "contribution": c.impact,
+                "reason": c.description,
                 "signal": c.signal_type,
                 "impact": c.impact,
                 "evidence": c.evidence_id,
@@ -1423,7 +2406,8 @@ async def list_scenarios():
 
 
 class ScenarioRequest(BaseModel):
-    scenario_id: str
+    scenario_id: Optional[str] = None
+    scenario_type: Optional[str] = None
 
 
 @app.post("/scenarios/inject", tags=["Scenarios"])
@@ -1434,7 +2418,10 @@ async def inject_scenario(request: ScenarioRequest):
     After injection, run /analysis/cycle to see agents respond.
     """
     try:
-        execution = _scenario_agent.inject_scenario(request.scenario_id)
+        scenario_key = request.scenario_id or request.scenario_type
+        if not scenario_key:
+            raise HTTPException(status_code=400, detail="Provide scenario_id or scenario_type")
+        execution = _scenario_agent.inject_scenario(scenario_key)
         return {
             "status": "injected",
             "execution": execution.to_dict(),
@@ -1712,6 +2699,34 @@ async def health_check():
         "cycle_interval": settings.CYCLE_INTERVAL_SECONDS,
         "components": components,
     }
+
+
+class SlackTestRequest(BaseModel):
+    message: str = Field(default="Hello from Chronos AI")
+
+
+@app.get("/alerts/slack/status", tags=["Alerts"])
+async def get_slack_alert_status():
+    """Get Slack integration status."""
+    return {
+        "enabled": bool(_slack_notifier and _slack_notifier.enabled),
+        "configured": bool(settings.SLACK_WEBHOOK_URL),
+        "min_severity": settings.SLACK_ALERT_MIN_SEVERITY,
+        "min_risk_state": settings.SLACK_ALERT_MIN_RISK_STATE,
+        "cooldown_seconds": settings.SLACK_ALERT_COOLDOWN_SECONDS,
+    }
+
+
+@app.post("/alerts/slack/test", tags=["Alerts"])
+async def send_slack_test_alert(request: SlackTestRequest):
+    """Send a test alert to Slack webhook."""
+    if not _slack_notifier or not _slack_notifier.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Slack alerts are disabled or webhook is not configured",
+        )
+    result = await _slack_notifier.send_test(request.message)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2146,3 +3161,264 @@ async def get_overview_stats():
         "cycles_completed": len(_state._completed_cycles),
         "agents_active": 9,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUDIT ENDPOINTS (P0: Post-Mortem Investigation APIs)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _risk_rank(value: str) -> int:
+    ranks = {
+        "NORMAL": 0,
+        "DEGRADED": 1,
+        "AT_RISK": 2,
+        "VIOLATION": 3,
+        "INCIDENT": 4,
+        "CRITICAL": 5,
+    }
+    return ranks.get((value or "").upper(), 0)
+
+
+def _cycle_hash(cycle_dict: Dict[str, Any]) -> str:
+    payload = json.dumps(cycle_dict, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _find_cycle(cycle_id: str):
+    for cycle in reversed(_state._completed_cycles):
+        if cycle.cycle_id == cycle_id:
+            return cycle
+    return None
+
+
+def _find_event(event_id: str):
+    # Observation layer keeps recent events in memory.
+    # For full retention search, use SQLite query APIs in the next iteration.
+    for event in _observation.get_recent_events(100000):
+        if event.event_id == event_id:
+            return event
+    return None
+
+
+class AuditExportRequest(BaseModel):
+    incident_id: str = Field(..., description="Incident identifier (cycle_id)")
+    format: str = Field(default="json", description="json or csv")
+
+
+@app.get("/audit/incidents", tags=["Audit"])
+async def list_audit_incidents(limit: int = Query(default=20, ge=1, le=200)):
+    """
+    List recent auditable incidents.
+
+    Incident model (P0): one reasoning cycle = one incident unit.
+    """
+    tracker = get_risk_tracker()
+    incidents = []
+    for cycle in reversed(_state._completed_cycles[-limit * 3:]):
+        cycle_risk_state = "NORMAL"
+        cycle_risk_score = 20.0
+        for point in reversed(tracker.get_history(500)):
+            if point.cycle_id == cycle.cycle_id:
+                cycle_risk_state = point.risk_state
+                cycle_risk_score = point.risk_score
+                break
+
+        if (
+            len(cycle.anomalies) == 0
+            and len(cycle.policy_hits) == 0
+            and _risk_rank(cycle_risk_state) < _risk_rank("AT_RISK")
+        ):
+            continue
+
+        incidents.append(
+            {
+                "incident_id": cycle.cycle_id,
+                "cycle_id": cycle.cycle_id,
+                "timestamp": (cycle.completed_at or cycle.started_at).isoformat(),
+                "risk_score": cycle_risk_score,
+                "risk_state": cycle_risk_state,
+                "anomaly_count": len(cycle.anomalies),
+                "policy_hit_count": len(cycle.policy_hits),
+                "causal_link_count": len(cycle.causal_links),
+                "status": "OPEN",
+            }
+        )
+        if len(incidents) >= limit:
+            break
+
+    return {"incidents": incidents, "count": len(incidents)}
+
+
+@app.get("/audit/incident/{incident_id}", tags=["Audit"])
+async def get_audit_incident(incident_id: str):
+    """Get incident detail with immutable cycle snapshot hash."""
+    cycle = _find_cycle(incident_id)
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    cycle_dict = cycle.to_dict()
+    evidence_ids = (
+        [a.anomaly_id for a in cycle.anomalies]
+        + [h.hit_id for h in cycle.policy_hits]
+        + [c.link_id for c in cycle.causal_links]
+    )
+    return {
+        "incident_id": incident_id,
+        "cycle_id": cycle.cycle_id,
+        "timestamp": (cycle.completed_at or cycle.started_at).isoformat(),
+        "counts": {
+            "anomalies": len(cycle.anomalies),
+            "policy_hits": len(cycle.policy_hits),
+            "risk_signals": len(cycle.risk_signals),
+            "causal_links": len(cycle.causal_links),
+            "recommendations": len(cycle.recommendations),
+        },
+        "evidence_ids": evidence_ids[:200],
+        "cycle_sha256": _cycle_hash(cycle_dict),
+        "cycle": cycle_dict,
+    }
+
+
+@app.get("/audit/incident/{incident_id}/timeline", tags=["Audit"])
+async def get_audit_incident_timeline(incident_id: str):
+    """Return forensic timeline for an incident/cycle."""
+    cycle = _find_cycle(incident_id)
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    timeline = []
+    # Include raw evidence timestamps where available
+    for anomaly in cycle.anomalies:
+        timeline.append(
+            {
+                "ts": anomaly.timestamp.isoformat(),
+                "kind": "anomaly",
+                "id": anomaly.anomaly_id,
+                "agent": anomaly.agent,
+                "summary": anomaly.description,
+                "confidence": anomaly.confidence,
+                "evidence_ids": anomaly.evidence,
+            }
+        )
+    for hit in cycle.policy_hits:
+        timeline.append(
+            {
+                "ts": hit.timestamp.isoformat(),
+                "kind": "policy_hit",
+                "id": hit.hit_id,
+                "agent": hit.agent,
+                "summary": hit.description,
+                "confidence": 0.9,
+                "evidence_ids": [hit.event_id],
+            }
+        )
+    for signal in cycle.risk_signals:
+        timeline.append(
+            {
+                "ts": signal.timestamp.isoformat(),
+                "kind": "risk_signal",
+                "id": signal.signal_id,
+                "agent": "RiskForecastAgent",
+                "summary": signal.reasoning,
+                "confidence": signal.confidence,
+                "evidence_ids": signal.evidence_ids,
+            }
+        )
+    for link in cycle.causal_links:
+        timeline.append(
+            {
+                "ts": link.timestamp.isoformat(),
+                "kind": "causal_link",
+                "id": link.link_id,
+                "agent": "CausalAgent",
+                "summary": f"{link.cause} -> {link.effect}",
+                "confidence": link.confidence,
+                "evidence_ids": link.evidence_ids,
+            }
+        )
+    for rec in cycle.recommendations:
+        timeline.append(
+            {
+                "ts": rec.timestamp.isoformat(),
+                "kind": "recommendation",
+                "id": rec.rec_id,
+                "agent": "MasterAgent",
+                "summary": rec.action,
+                "confidence": 0.8,
+                "evidence_ids": [],
+            }
+        )
+
+    timeline.sort(key=lambda x: x["ts"])
+    return {
+        "incident_id": incident_id,
+        "timeline": timeline,
+        "count": len(timeline),
+    }
+
+
+@app.get("/audit/event/{event_id}/raw", tags=["Audit"])
+async def get_raw_event(event_id: str):
+    """Get raw observed event payload for evidence proof."""
+    event = _find_event(event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    return {
+        "event_id": event.event_id,
+        "type": event.type,
+        "workflow_id": event.workflow_id,
+        "actor": event.actor,
+        "resource": event.resource,
+        "timestamp": event.timestamp.isoformat(),
+        "metadata": event.metadata,
+        "observed_at": event.observed_at.isoformat(),
+    }
+
+
+@app.get("/audit/cycle/{cycle_id}", tags=["Audit"])
+async def get_audit_cycle(cycle_id: str):
+    """Return frozen blackboard cycle with deterministic hash."""
+    cycle = _find_cycle(cycle_id)
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Cycle not found")
+    cycle_dict = cycle.to_dict()
+    return {
+        "cycle_id": cycle_id,
+        "cycle_sha256": _cycle_hash(cycle_dict),
+        "cycle": cycle_dict,
+    }
+
+
+@app.post("/audit/export", tags=["Audit"])
+async def export_audit_report(request: AuditExportRequest):
+    """
+    Export an audit snapshot payload.
+    P0 supports JSON/CSV payload generation; PDF renderer can be added later.
+    """
+    cycle = _find_cycle(request.incident_id)
+    if not cycle:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    cycle_dict = cycle.to_dict()
+    payload = {
+        "incident_id": request.incident_id,
+        "generated_at": datetime.utcnow().isoformat(),
+        "cycle_sha256": _cycle_hash(cycle_dict),
+        "cycle": cycle_dict,
+    }
+    if request.format.lower() == "csv":
+        rows = [
+            "kind,id,timestamp,agent,summary,confidence",
+        ]
+        for a in cycle.anomalies:
+            rows.append(
+                f"anomaly,{a.anomaly_id},{a.timestamp.isoformat()},{a.agent},\"{a.description}\",{a.confidence}"
+            )
+        for h in cycle.policy_hits:
+            rows.append(
+                f"policy_hit,{h.hit_id},{h.timestamp.isoformat()},{h.agent},\"{h.description}\",0.9"
+            )
+        payload["csv"] = "\n".join(rows)
+
+    return {"status": "ok", "format": request.format.lower(), "report": payload}

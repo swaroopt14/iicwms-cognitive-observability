@@ -49,6 +49,24 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+### Backend Connection (DevOps)
+
+The frontend expects the backend at `http://localhost:8000` by default.
+
+To override:
+
+```bash
+export NEXT_PUBLIC_API_URL=http://localhost:8000
+npm run dev
+```
+
+Common checks:
+
+```bash
+curl -s http://localhost:8000/system/health | head
+curl -I http://localhost:3000 | head
+```
+
 ### Production Build
 
 ```bash

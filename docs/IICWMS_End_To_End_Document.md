@@ -853,17 +853,22 @@ Step 10: UI VISUALIZES RESULTS
 
 ### 5.1 Agent Registry
 
+Update (2026-02-15):
+- Added **Code Agent** (pre-deploy prediction) to convert GitHub PR/CI webhook events into evidence-backed anomalies.
+- This keeps the same architecture: Phase 1 parallel detection, then sequential risk + causal reasoning.
+
 | # | Agent | Purpose | Runs |
 |---|-------|---------|------|
 | 1 | **Workflow Agent** | Detects workflow execution anomalies | Parallel (Phase 1) |
 | 2 | **Resource Agent** | Monitors resource conditions and trends | Parallel (Phase 1) |
 | 3 | **Compliance Agent** | Checks events against policy definitions | Parallel (Phase 1) |
 | 4 | **Adaptive Baseline Agent** | Learns normal behavior, detects deviations | Parallel (Phase 1) |
-| 5 | **Risk Forecast Agent** | Predicts risk trajectory | Sequential (Phase 2) |
-| 6 | **Causal Agent** | Identifies cause-effect relationships | Sequential (Phase 3) |
-| 7 | **Master Agent** | Orchestrates reasoning cycle | Coordinator |
-| 8 | **Query Agent (RAG)** | Answers natural language queries | On-demand |
-| 9 | **Scenario Injection Agent** | Injects stress scenarios for testing | On-demand |
+| 5 | **Code Agent** | Predicts risky PR/CI changes (churn/coverage/hotspots) | Parallel (Phase 1) |
+| 6 | **Risk Forecast Agent** | Predicts risk trajectory | Sequential (Phase 2) |
+| 7 | **Causal Agent** | Identifies cause-effect relationships | Sequential (Phase 3) |
+| 8 | **Master Agent** | Orchestrates reasoning cycle | Coordinator |
+| 9 | **Query Agent (RAG)** | Answers natural language queries | On-demand |
+| 10 | **Scenario Injection Agent** | Injects stress scenarios for testing | On-demand |
 
 ### 5.2 Coordination Model
 
@@ -912,6 +917,7 @@ Step 10: UI VISUALIZES RESULTS
 | **Resource Agent** | Observation Layer (resource metrics), threshold configs | Blackboard → `anomalies[]` |
 | **Compliance Agent** | Observation Layer (all events), static policy registry | Blackboard → `policy_hits[]` |
 | **Adaptive Baseline Agent** | Observation Layer (metrics), learned baselines | Blackboard → `anomalies[]` |
+| **Code Agent** | Observation Layer (GitHub PR/CI events via webhook ingest) | Blackboard → `anomalies[]` |
 | **Risk Forecast Agent** | Blackboard (anomalies, policy_hits) | Blackboard → `risk_signals[]` |
 | **Causal Agent** | Blackboard (anomalies, policy_hits, risk_signals) | Blackboard → `causal_links[]` |
 | **Master Agent** | Observation Layer, Blackboard (all sections) | Blackboard → `recommendations[]`, cycle control |
@@ -1300,10 +1306,20 @@ The system uses a **three-tier fallback** for explanation generation:
 - **Auto-refresh**: 5–15 seconds
 
 #### Page 2: Workflow Timeline
-- **Purpose**: Visualize workflow execution across 4 lanes
-- **Lanes**: Workflow Steps | Resource Impact | Human Actions | Compliance
+- **Purpose**: Visualize workflow execution across enterprise lanes (end-to-end trace)
+- **Lanes**: Code & CI | Workflow Steps | Resource Impact | Human Actions | Compliance
 - **Features**: Stock-style confidence timeline, event nodes with status coloring (success/delayed/failed/warning), dependency lines between events, zoom and time range controls, event detail panel
 - **Key Insight**: Shows *why* a workflow degraded, not just *that* it degraded
+
+Update (2026-02-15): Pre-deploy prediction is now part of the same timeline:
+- `POST /ingest/github/webhook` ingests PR/CI events (demo mode).
+- CodeAgent emits predictive anomalies (churn/coverage/complexity/hotspots) as evidence-backed blackboard anomalies.
+- Timeline correlates PR/CI → deploy → runtime via `enterprise_context.deployment_id` and `trace_id`.
+
+Workflow landing update (same page):
+- Main workflow landing is now an enterprise table grouped by project/env with:
+  - `input_source` and `issue_category` columns for interpretability.
+  - scroll-safe layout + search.
 
 #### Page 3: Resource & Cost Intelligence
 - **Purpose**: Infrastructure usage analysis with cost implications

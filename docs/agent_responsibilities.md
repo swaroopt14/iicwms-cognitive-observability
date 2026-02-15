@@ -8,6 +8,10 @@ All agents follow these principles:
 - **Evidence-backed** - Every claim points to data
 - **Single responsibility** - One clear purpose
 
+Update note (2026-02-15):
+- Added **CodeAgent** to convert GitHub PR/CI webhook events into predictive anomalies (pre-deploy).
+- These anomalies are surfaced into the Workflow Timeline as `laneId=code` nodes in demo mode.
+
 ---
 
 ## 1. Workflow Agent
@@ -178,6 +182,39 @@ NORMAL → DEGRADED → AT_RISK → VIOLATION → INCIDENT
 
 ### Forbidden
 - No deep reasoning (delegates to specialized agents)
+
+---
+
+## 7. Code Agent (Pre-Deploy Prediction)
+
+**Purpose:** Convert GitHub PR/CI signals into *predictive* risk anomalies before deployment.
+
+### Input
+- GitHub webhook events ingested into Observation Layer:
+  - PR opened/updated/reviewed/merged
+  - GitHub Actions `workflow_run` events (CI results)
+
+### Detects (Current Demo Heuristics)
+- **HIGH_CHURN_PR** — high additions/deletions/churn indicates elevated failure probability
+- **LOW_TEST_COVERAGE** — coverage below 70% predicts higher post-deploy bug risk
+- **HIGH_COMPLEXITY_HINT** — complexity hints (if provided) indicate risky change
+- **HOTSPOT_FILE_CHANGE** — risky files changed (regex/auth/policy/payment hotspots)
+
+### Output (Blackboard Anomaly)
+```json
+{
+  "type": "LOW_TEST_COVERAGE",
+  "agent": "CodeAgent",
+  "confidence": 0.80,
+  "evidence": ["evt_...github_pr", "evt_...github_ci"],
+  "description": "wf_deployment_03 deploy deploy_demo_001: low test coverage (62%) predicts higher runtime bug risk"
+}
+```
+
+### Design Notes
+- Deterministic, explainable rules (no LLM).
+- Uses `enterprise_context.deployment_id` for correlation to deploy/runtime.
+- Enables “predictive/proactive” stage in the judge story: PR risk before deploy starts.
 - No LLM usage
 - No direct event creation
 

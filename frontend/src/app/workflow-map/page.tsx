@@ -3,8 +3,6 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   GitBranch,
-  Settings,
-  HelpCircle,
   ZoomIn,
   ZoomOut,
   Download,
@@ -24,15 +22,19 @@ import {
   ArrowRight,
   Loader2,
 } from 'lucide-react';
-import { formatTime, formatDateTime } from '@/lib/utils';
+import { formatTime } from '@/lib/utils';
 import { DonutChart, Sparkline } from '@/components/Charts';
-import { fetchWorkflowTimeline, type TimelineData } from '@/lib/api';
+import {
+  fetchWorkflowTimeline,
+  fetchWorkflows,
+  type TimelineData,
+} from '@/lib/api';
 
 // ============================================
 // Types adapted to IICWMS problem statement
 // ============================================
 type EventNodeStatus = 'success' | 'delayed' | 'failed' | 'retry' | 'skipped' | 'warning' | 'in_progress' | 'pending' | 'missing';
-type EventLaneId = 'workflow' | 'resource' | 'human' | 'compliance';
+type EventLaneId = 'code' | 'workflow' | 'resource' | 'human' | 'compliance';
 
 interface EventNode {
   id: string;
@@ -43,7 +45,7 @@ interface EventNode {
   timestampMs: number;
   durationMs?: number;
   confidence?: number;
-  details: Record<string, string | number | boolean>;
+  details: Record<string, unknown>;
   error?: { code: string; message: string; recovery?: string };
   attempt?: number;
   dependsOn?: string[];
@@ -62,6 +64,18 @@ interface EventGraphData {
   nodes: EventNode[];
   overallConfidence: number;
   outcomeSummary?: string;
+}
+
+interface WorkflowOption {
+  id: string;
+  label: string;
+  projectId: string;
+  projectName: string;
+  environment: string;
+  contextTag: string;
+  status: string;
+  inputSource: string;
+  issueCategory: string;
 }
 
 type TimeRangePreset = '5m' | '15m' | '1h' | '6h' | '24h';
@@ -88,6 +102,7 @@ const STATUS_CONFIG: Record<EventNodeStatus, {
 };
 
 const LANE_CONFIG: Record<EventLaneId, { label: string; color: string }> = {
+  code:       { label: 'Code & CI',   color: '#0ea5e9' },
   workflow:   { label: 'Workflow',   color: '#6366f1' },
   resource:   { label: 'Resource',   color: '#10b981' },
   human:      { label: 'Human',      color: '#f59e0b' },
@@ -97,6 +112,80 @@ const LANE_CONFIG: Record<EventLaneId, { label: string; color: string }> = {
 function getConfidence(node: EventNode): number {
   if (node.confidence != null) return node.confidence;
   return STATUS_CONFIG[node.status]?.confidence ?? 50;
+}
+
+function mapTimelineToGraph(timeline: TimelineData): EventGraphData {
+  const nodes: EventNode[] = timeline.nodes.map((n) => ({
+    id: n.id,
+    laneId: n.laneId as EventLaneId,
+    name: n.name,
+    status: n.status as EventNodeStatus,
+    timestamp: n.timestamp,
+    timestampMs: n.timestampMs,
+    durationMs: n.durationMs ?? undefined,
+    confidence: n.confidence,
+    details: (n.details || {}) as Record<string, unknown>,
+    dependsOn: n.dependsOn || [],
+    agentSource: n.agentSource || 'system',
+    error: n.error,
+  }));
+
+  return {
+    workflowId: timeline.workflowId,
+    workflowLabel: timeline.workflowLabel,
+    startTime: timeline.startTime,
+    endTime: timeline.endTime,
+    totalDurationMs: timeline.endTime - timeline.startTime,
+    lanes: timeline.lanes.map((l) => ({
+      id: l.id as EventLaneId,
+      label: l.label,
+      order: l.order,
+      visible: l.visible,
+    })),
+    nodes,
+    overallConfidence: timeline.overallConfidence,
+    outcomeSummary: timeline.outcomeSummary,
+  };
+}
+
+function formatContextTag(tag?: string): string {
+  if (!tag) return 'workflow';
+  return tag.replace(/_/g, ' ');
+}
+
+function formatChipLabel(s?: string): string {
+  if (!s) return 'unknown';
+  return s.replace(/_/g, ' ');
+}
+
+function formatInputSource(s?: string): string {
+  const v = (s || '').toLowerCase();
+  if (!v) return 'system';
+  if (v === 'github') return 'GitHub';
+  if (v === 'client_side') return 'Client';
+  if (v === 'server_failure') return 'Server';
+  if (v === 'deployment_pipeline') return 'CI/CD';
+  if (v === 'system_internal') return 'System';
+  return formatChipLabel(v);
+}
+
+function formatIssueCategory(s?: string): string {
+  const v = (s || '').toLowerCase();
+  if (!v) return 'workflow anomaly';
+  if (v === 'deployment_pipeline') return 'deployment';
+  if (v === 'code_error_or_bug') return 'code bug';
+  if (v === 'client_side_error') return 'client error';
+  if (v === 'server_failure') return 'infra/server';
+  if (v === 'compliance_or_data_risk') return 'compliance/data';
+  return formatChipLabel(v);
+}
+
+function statusDotClass(status: string): string {
+  const s = status.toLowerCase();
+  if (s.includes('fail') || s.includes('critical')) return 'bg-red-500';
+  if (s.includes('delay') || s.includes('degrad')) return 'bg-amber-500';
+  if (s.includes('active') || s.includes('run')) return 'bg-emerald-500';
+  return 'bg-slate-400';
 }
 
 // ============================================
@@ -216,14 +305,6 @@ function TimelineCanvas({
     const bottom = PAD_TOP + (100 - PAD_TOP - PAD_BOTTOM); // y for 0% confidence
     return `${first},${bottom} ${linePath} ${last},${bottom}`;
   }, [sortedNodes, linePath, toX]);
-
-  // Confidence color based on value
-  const getNodeColor = (node: EventNode) => {
-    const conf = getConfidence(node);
-    if (conf >= 80) return '#10b981';
-    if (conf >= 50) return '#f59e0b';
-    return '#ef4444';
-  };
 
   const formatTimeLabel = (ms: number) => {
     const d = new Date(ms);
@@ -439,6 +520,7 @@ function EventDetailsPanel({
   node: EventNode | null;
   onClose: () => void;
 }) {
+  void onClose;
   if (!node) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-8 text-center">
@@ -458,12 +540,104 @@ function EventDetailsPanel({
   const conf = getConfidence(node);
   const confColor = conf >= 80 ? '#10b981' : conf >= 50 ? '#f59e0b' : '#ef4444';
 
-  // Mock confidence trend for this node
-  const confTrend = Array.from({ length: 6 }, (_, i) => Math.max(0, Math.min(100, conf + (Math.random() - 0.5) * 30 - i * 5)));
+  // Deterministic confidence trend to keep renders pure.
+  const confTrend = Array.from({ length: 6 }, (_, i) => Math.max(0, Math.min(100, conf - i * 4)));
+
+  const details = node.details || {};
+  const enterpriseCtx = details['enterprise_context'];
+  const actorCtx = details['actor_context'];
+  const sourceSig = details['source_signature'];
+  const normalized = details['normalized_event'];
+  const traceId = details['trace_id'];
+  const tenantKey = details['tenant_key'];
+  const eventPayload = details['event_payload'];
+  const logPayload = details['log_payload'];
+
+  const toJson = (v: unknown): string => {
+    try {
+      return JSON.stringify(v, null, 2);
+    } catch {
+      return String(v);
+    }
+  };
+
+  const isScalar = (v: unknown) =>
+    v == null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+
+  const scalarDetailsEntries = Object.entries(details).filter(([k, v]) => {
+    if (k === 'enterprise_context') return false;
+    if (k === 'actor_context') return false;
+    if (k === 'source_signature') return false;
+    if (k === 'normalized_event') return false;
+    if (k === 'event_payload') return false;
+    if (k === 'log_payload') return false;
+    return isScalar(v);
+  });
+
+  const whatHappened = (() => {
+    const base = `${LANE_CONFIG[node.laneId].label}: ${node.name} is ${STATUS_CONFIG[node.status].label.toLowerCase()}.`;
+    const dur = node.durationMs ? ` Duration ${(node.durationMs / 1000).toFixed(1)}s.` : '';
+    const step = typeof details['step'] === 'string' ? ` Step: ${details['step']}.` : '';
+    const metric = typeof details['metric'] === 'string' ? ` Metric: ${details['metric']}.` : '';
+    const value = typeof details['value'] === 'number' ? ` Value: ${details['value']}.` : '';
+    const policy = typeof details['policy'] === 'string' ? ` Policy: ${details['policy']}.` : '';
+    return `${base}${dur}${step}${metric}${value}${policy}`.trim();
+  })();
+
+  const howItHappened = (() => {
+    const srcTool =
+      typeof sourceSig === 'object' && sourceSig !== null && 'tool_name' in sourceSig && typeof (sourceSig as { tool_name?: unknown }).tool_name === 'string'
+        ? String((sourceSig as { tool_name?: unknown }).tool_name)
+        : undefined;
+    const srcType =
+      typeof sourceSig === 'object' && sourceSig !== null && 'tool_type' in sourceSig && typeof (sourceSig as { tool_type?: unknown }).tool_type === 'string'
+        ? String((sourceSig as { tool_type?: unknown }).tool_type)
+        : undefined;
+    const actorRole =
+      typeof actorCtx === 'object' && actorCtx !== null && 'role' in actorCtx && typeof (actorCtx as { role?: unknown }).role === 'string'
+        ? String((actorCtx as { role?: unknown }).role)
+        : undefined;
+    const actorTeam =
+      typeof actorCtx === 'object' && actorCtx !== null && 'team' in actorCtx && typeof (actorCtx as { team?: unknown }).team === 'string'
+        ? String((actorCtx as { team?: unknown }).team)
+        : undefined;
+    const nType =
+      typeof normalized === 'object' && normalized !== null && 'event_type' in normalized && typeof (normalized as { event_type?: unknown }).event_type === 'string'
+        ? String((normalized as { event_type?: unknown }).event_type)
+        : undefined;
+    const parts = [
+      srcTool || srcType ? `Source: ${[srcTool, srcType].filter(Boolean).join(' / ')}` : null,
+      actorRole || actorTeam ? `Actor: ${[actorRole, actorTeam].filter(Boolean).join(' @ ')}` : null,
+      nType ? `Normalized: ${nType}` : null,
+    ].filter(Boolean);
+    return parts.length ? parts.join(' | ') : 'Source/actor context not available for this event.';
+  })();
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="p-5 space-y-5">
+        {/* Enterprise Narrative */}
+        <div className="p-4 rounded-xl border border-[var(--color-border)] bg-white">
+          <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">What Happened</div>
+          <p className="text-sm text-[var(--color-text-primary)]">{whatHappened}</p>
+          <div className="mt-3 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">How It Happened</div>
+          <p className="text-xs text-[var(--color-text-secondary)]">{howItHappened}</p>
+          {(traceId != null || tenantKey != null) && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {traceId != null && (
+                <span className="text-[10px] px-2 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
+                  trace_id: <span className="font-mono">{String(traceId)}</span>
+                </span>
+              )}
+              {tenantKey != null && (
+                <span className="text-[10px] px-2 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
+                  tenant: <span className="font-mono">{String(tenantKey)}</span>
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Header Card */}
         <div className="p-4 rounded-xl border border-[var(--color-border)] bg-gradient-to-br from-slate-50 to-white space-y-4">
           {/* Event Name & ID */}
@@ -529,17 +703,66 @@ function EventDetailsPanel({
         </div>
 
         {/* Details Key-Value */}
-        {Object.keys(node.details).length > 0 && (
+        {scalarDetailsEntries.length > 0 && (
           <div className="p-4 rounded-xl border border-[var(--color-border)]">
             <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Details</div>
             <div className="space-y-2 text-xs">
-              {Object.entries(node.details).map(([key, value]) => (
+              {scalarDetailsEntries.map(([key, value]) => (
                 <div key={key} className="flex justify-between gap-4 py-1 border-b border-[var(--color-border-light)] last:border-0">
                   <span className="text-[var(--color-text-muted)] flex-shrink-0">{key}</span>
                   <span className="text-[var(--color-text-primary)] text-right font-mono">{String(value)}</span>
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* Enterprise Context Blocks */}
+        {enterpriseCtx != null && (
+          <div className="p-4 rounded-xl border border-[var(--color-border)]">
+            <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Enterprise Context</div>
+            <pre className="text-[11px] overflow-auto max-h-56 bg-slate-50 rounded-lg p-3 border border-[var(--color-border-light)]">
+              {toJson(enterpriseCtx)}
+            </pre>
+          </div>
+        )}
+        {actorCtx != null && (
+          <div className="p-4 rounded-xl border border-[var(--color-border)]">
+            <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Actor Context</div>
+            <pre className="text-[11px] overflow-auto max-h-56 bg-slate-50 rounded-lg p-3 border border-[var(--color-border-light)]">
+              {toJson(actorCtx)}
+            </pre>
+          </div>
+        )}
+        {sourceSig != null && (
+          <div className="p-4 rounded-xl border border-[var(--color-border)]">
+            <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Source Signature</div>
+            <pre className="text-[11px] overflow-auto max-h-56 bg-slate-50 rounded-lg p-3 border border-[var(--color-border-light)]">
+              {toJson(sourceSig)}
+            </pre>
+          </div>
+        )}
+        {normalized != null && (
+          <div className="p-4 rounded-xl border border-[var(--color-border)]">
+            <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Normalized Event</div>
+            <pre className="text-[11px] overflow-auto max-h-56 bg-slate-50 rounded-lg p-3 border border-[var(--color-border-light)]">
+              {toJson(normalized)}
+            </pre>
+          </div>
+        )}
+        {(eventPayload != null || logPayload != null) && (
+          <div className="p-4 rounded-xl border border-[var(--color-border)]">
+            <div className="text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Raw Payload</div>
+            {eventPayload != null && (
+              <pre className="text-[11px] overflow-auto max-h-56 bg-slate-50 rounded-lg p-3 border border-[var(--color-border-light)] mb-3">
+                {toJson(eventPayload)}
+              </pre>
+            )}
+            {logPayload != null && (
+              <pre className="text-[11px] overflow-auto max-h-56 bg-slate-50 rounded-lg p-3 border border-[var(--color-border-light)]">
+                {toJson(logPayload)}
+              </pre>
+            )}
           </div>
         )}
 
@@ -631,35 +854,160 @@ function EventGraphLegend() {
 // ============================================
 // Empty State
 // ============================================
-function EmptyState({ onSelectWorkflow }: { onSelectWorkflow: (id: string) => void }) {
+function EmptyState({
+  workflows,
+  onSelectWorkflow,
+}: {
+  workflows: WorkflowOption[];
+  onSelectWorkflow: (id: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return workflows;
+    return workflows.filter((w) => {
+      const hay = [
+        w.id,
+        w.label,
+        w.projectName,
+        w.environment,
+        w.contextTag,
+        w.inputSource,
+        w.issueCategory,
+        w.status,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [workflows, query]);
+
+  const tableRows = filtered;
+
   return (
-    <div className="flex-1 flex flex-col items-center justify-center p-8 bg-gradient-to-b from-slate-50 to-white">
-      <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-indigo-100 to-violet-100 flex items-center justify-center mb-6 shadow-lg">
-        <GitBranch className="w-10 h-10 text-indigo-500" />
-      </div>
-      <h2 className="text-xl font-semibold text-[var(--color-text-primary)] mb-2">
-        Select a Workflow to Visualize
-      </h2>
-      <p className="text-sm text-[var(--color-text-secondary)] text-center max-w-md mb-8">
-        Choose a workflow to see how it evolves over time across workflow steps, resource impact, 
-        human actions, and compliance checks.
-      </p>
-      <div className="grid grid-cols-2 gap-4 w-full max-w-md">
-        {['wf_onboarding_17', 'wf_deployment_03'].map((id) => (
-          <button
-            key={id}
-            onClick={() => onSelectWorkflow(id)}
-            className="p-4 rounded-xl border border-[var(--color-border)] bg-white hover:border-[var(--color-primary)] hover:shadow-md transition-all text-left group"
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <GitBranch className="w-4 h-4 text-[var(--color-primary)] group-hover:scale-110 transition-transform" />
-              <span className="text-sm font-semibold text-[var(--color-text-primary)]">{id}</span>
+    <div className="flex-1 flex flex-col bg-gradient-to-b from-slate-50 to-white min-h-0">
+      <div className="px-6 pt-6 pb-4 border-b border-[var(--color-border)] bg-white/70 backdrop-blur">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-indigo-100 to-violet-100 flex items-center justify-center shadow-sm">
+              <GitBranch className="w-7 h-7 text-indigo-500" />
             </div>
-            <span className="text-xs text-[var(--color-text-muted)]">
-              {id === 'wf_onboarding_17' ? 'User Onboarding' : 'Service Deployment'}
-            </span>
-          </button>
-        ))}
+            <div>
+              <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">Workflows</h2>
+              <p className="text-sm text-[var(--color-text-secondary)]">
+                Enterprise context is modeled at ingestion: project, environment, ownership, and input origin.
+              </p>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                Input origin examples: GitHub deploy triggers, client-side errors, server failures, code bugs.
+              </p>
+            </div>
+          </div>
+          <div className="w-full max-w-sm">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="input w-full"
+              placeholder="Search workflow, project, env, source, issue..."
+            />
+            <div className="mt-2 flex items-center gap-2 text-[11px] text-[var(--color-text-muted)]">
+              <span className="badge badge-neutral text-[10px]">{tableRows.length} shown</span>
+              <span className="badge badge-info text-[10px]">{workflows.length} total</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-auto">
+        <div className="min-w-[980px] px-6 py-5">
+          <div className="rounded-2xl border border-[var(--color-border)] bg-white shadow-sm overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 z-10 bg-white border-b border-[var(--color-border)]">
+                <tr className="text-[11px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                  <th className="text-left font-semibold px-4 py-3">Workflow</th>
+                  <th className="text-left font-semibold px-4 py-3">Project</th>
+                  <th className="text-left font-semibold px-4 py-3">Env</th>
+                  <th className="text-left font-semibold px-4 py-3">Context</th>
+                  <th className="text-left font-semibold px-4 py-3">Input Origin</th>
+                  <th className="text-left font-semibold px-4 py-3">Issue Type</th>
+                  <th className="text-left font-semibold px-4 py-3">Status</th>
+                  <th className="text-right font-semibold px-4 py-3">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tableRows.map((wf) => (
+                  <tr
+                    key={wf.id}
+                    className="border-b border-[var(--color-border-light)] last:border-0 hover:bg-slate-50/70"
+                  >
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2.5 h-2.5 rounded-full ${statusDotClass(wf.status)}`} />
+                        <div className="min-w-0">
+                          <div className="font-semibold text-[var(--color-text-primary)] truncate">{wf.label}</div>
+                          <div className="text-[11px] font-mono text-[var(--color-text-muted)] truncate">{wf.id}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="text-[var(--color-text-primary)] font-medium">{wf.projectName}</div>
+                      <div className="text-[11px] font-mono text-[var(--color-text-muted)]">{wf.projectId}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[11px] px-2 py-1 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-100">
+                        {wf.environment}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[11px] px-2 py-1 rounded-md bg-amber-50 text-amber-800 border border-amber-100">
+                        {formatContextTag(wf.contextTag)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[11px] px-2 py-1 rounded-md bg-slate-50 text-slate-700 border border-slate-200">
+                        {formatInputSource(wf.inputSource)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[11px] px-2 py-1 rounded-md bg-rose-50 text-rose-800 border border-rose-100">
+                        {formatIssueCategory(wf.issueCategory)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[11px] px-2 py-1 rounded-md bg-slate-100 text-slate-700">
+                        {formatChipLabel(wf.status)}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      <button
+                        onClick={() => onSelectWorkflow(wf.id)}
+                        className="btn btn-primary btn-sm"
+                      >
+                        View Timeline
+                        <ArrowRight className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {tableRows.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-10 text-center text-sm text-[var(--color-text-muted)]">
+                      No workflows match this search.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-4 text-xs text-[var(--color-text-muted)] flex items-start gap-2">
+            <Zap className="w-4 h-4 text-indigo-500 mt-0.5" />
+            <p>
+              This table is the primary enterprise view. Selecting a row opens the real-time timeline graph and evidence panel.
+              The backend auto-refreshes the list every 15s; the selected workflow timeline refreshes every 10s when live.
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -669,8 +1017,9 @@ function EmptyState({ onSelectWorkflow }: { onSelectWorkflow: (id: string) => vo
 // Main Page
 // ============================================
 export default function WorkflowMapPage() {
-  const ALL_LANES: Set<EventLaneId> = new Set(['workflow', 'resource', 'human', 'compliance']);
+  const ALL_LANES: Set<EventLaneId> = new Set(['code', 'workflow', 'resource', 'human', 'compliance']);
 
+  const [workflows, setWorkflows] = useState<WorkflowOption[]>([]);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [graphData, setGraphData] = useState<EventGraphData | null>(null);
   const [timeRange, setTimeRange] = useState<TimeRangePreset>('15m');
@@ -681,42 +1030,50 @@ export default function WorkflowMapPage() {
   const [loading, setLoading] = useState(false);
   const [isLive, setIsLive] = useState(false);
 
+  useEffect(() => {
+    let mounted = true;
+    const loadWorkflows = async () => {
+      try {
+        const list = await fetchWorkflows();
+        const mapped: WorkflowOption[] = (list || [])
+          .map((w) => {
+            const id = String((w as unknown as { workflow_id?: string; id?: string }).workflow_id || (w as unknown as { workflow_id?: string; id?: string }).id || '');
+            return {
+              id,
+              label: String(w.name || id),
+              projectId: String(w.project_id || 'proj_unknown'),
+              projectName: String(w.project_name || 'Unassigned Project'),
+              environment: String(w.environment || 'production'),
+              contextTag: String(w.context_tag || 'workflow'),
+              status: String(w.status || 'unknown'),
+              inputSource: String(w.input_source || 'system_internal'),
+              issueCategory: String(w.issue_category || 'workflow_anomaly'),
+            };
+          })
+          .filter((w) => Boolean(w.id));
+        if (mounted && mapped.length > 0) {
+          setWorkflows(mapped);
+        }
+      } catch {
+        // keep previous values
+      }
+    };
+
+    loadWorkflows();
+    const interval = setInterval(loadWorkflows, 15000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Auto-refresh every 10s when a workflow is selected and live
   useEffect(() => {
     if (!selectedWorkflowId || !isLive) return;
     const interval = setInterval(async () => {
       try {
         const timeline = await fetchWorkflowTimeline(selectedWorkflowId);
-        const nodes: EventNode[] = timeline.nodes.map((n) => ({
-          id: n.id,
-          laneId: n.laneId as EventLaneId,
-          name: n.name,
-          status: n.status as EventNodeStatus,
-          timestamp: n.timestamp,
-          timestampMs: n.timestampMs,
-          durationMs: n.durationMs ?? undefined,
-          confidence: n.confidence,
-          details: n.details as Record<string, string | number | boolean>,
-          agentSource: n.agentSource || 'system',
-          dependsOn: n.dependsOn || [],
-          error: n.error,
-        }));
-        setGraphData({
-          workflowId: timeline.workflowId,
-          workflowLabel: timeline.workflowLabel,
-          startTime: timeline.startTime,
-          endTime: timeline.endTime,
-          totalDurationMs: timeline.endTime - timeline.startTime,
-          lanes: timeline.lanes.map((l) => ({
-            id: l.id as EventLaneId,
-            label: l.label,
-            order: l.order,
-            visible: l.visible,
-          })),
-          nodes,
-          overallConfidence: timeline.overallConfidence,
-          outcomeSummary: timeline.outcomeSummary,
-        });
+        setGraphData(mapTimelineToGraph(timeline));
       } catch {
         // Silent refresh failure
       }
@@ -732,38 +1089,7 @@ export default function WorkflowMapPage() {
     
     try {
       const timeline = await fetchWorkflowTimeline(id);
-      // Convert backend timeline to our EventGraphData format
-      const nodes: EventNode[] = timeline.nodes.map((n) => ({
-        id: n.id,
-        laneId: n.laneId as EventLaneId,
-        name: n.name,
-        status: n.status as EventNodeStatus,
-        timestamp: n.timestamp,
-        timestampMs: n.timestampMs,
-        durationMs: n.durationMs ?? undefined,
-        confidence: n.confidence,
-        details: n.details as Record<string, string | number | boolean>,
-        dependsOn: n.dependsOn,
-        agentSource: n.agentSource,
-        error: n.error,
-      }));
-      
-      setGraphData({
-        workflowId: timeline.workflowId,
-        workflowLabel: timeline.workflowLabel,
-        startTime: timeline.startTime,
-        endTime: timeline.endTime,
-        totalDurationMs: timeline.endTime - timeline.startTime,
-        lanes: timeline.lanes.map((l) => ({
-          id: l.id as EventLaneId,
-          label: l.label,
-          order: l.order,
-          visible: l.visible,
-        })),
-        nodes,
-        overallConfidence: timeline.overallConfidence,
-        outcomeSummary: timeline.outcomeSummary,
-      });
+      setGraphData(mapTimelineToGraph(timeline));
       setIsLive(true);
     } catch {
       // Fallback to local mock data
@@ -792,6 +1118,16 @@ export default function WorkflowMapPage() {
     { value: '24h', label: '24h' },
   ];
 
+  const workflowsByProject = useMemo(() => {
+    const grouped: Record<string, WorkflowOption[]> = {};
+    for (const wf of workflows) {
+      const key = `${wf.projectName} (${wf.environment})`;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(wf);
+    }
+    return grouped;
+  }, [workflows]);
+
   return (
     <div className="animate-fade-in flex flex-col" style={{ height: 'calc(100vh - 100px)' }}>
       {/* Page Header */}
@@ -817,11 +1153,18 @@ export default function WorkflowMapPage() {
           <select
             value={selectedWorkflowId || ''}
             onChange={(e) => e.target.value && selectWorkflow(e.target.value)}
-            className="input w-56"
+            className="input w-80"
           >
             <option value="">Select Workflow...</option>
-            <option value="wf_onboarding_17">wf_onboarding_17 — User Onboarding</option>
-            <option value="wf_deployment_03">wf_deployment_03 — Service Deployment</option>
+            {Object.entries(workflowsByProject).map(([project, projectWorkflows]) => (
+              <optgroup key={project} label={project}>
+                {projectWorkflows.map((wf) => (
+                  <option key={wf.id} value={wf.id}>
+                    {wf.id} — {wf.label} [{formatContextTag(wf.contextTag)}]
+                  </option>
+                ))}
+              </optgroup>
+            ))}
           </select>
         </div>
       </div>
@@ -928,7 +1271,7 @@ export default function WorkflowMapPage() {
       {/* Main Content */}
       <div className="flex-1 flex rounded-2xl border border-[var(--color-border)] bg-white overflow-hidden shadow-sm min-h-0">
         {!graphData ? (
-          <EmptyState onSelectWorkflow={selectWorkflow} />
+          <EmptyState workflows={workflows} onSelectWorkflow={selectWorkflow} />
         ) : (
           <>
             {/* Chart area */}

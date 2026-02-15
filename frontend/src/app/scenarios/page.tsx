@@ -14,18 +14,14 @@ import {
   Network,
   Clock,
   ChevronRight,
-  ChevronDown,
   Loader2,
   FlaskConical,
   BarChart3,
   Info,
   X,
-  ExternalLink,
   Eye,
-  FileText,
-  ArrowRight,
 } from 'lucide-react';
-import { DonutChart, Sparkline } from '@/components/Charts';
+import { DonutChart } from '@/components/Charts';
 import { fetchScenarios as fetchScenariosApi, injectScenario, triggerAnalysisCycle, fetchScenarioExecutions } from '@/lib/api';
 
 // ============================================
@@ -64,6 +60,44 @@ interface ScenarioExecution {
   agent_findings?: AgentFinding[];
 }
 
+function normalizeScenario(raw: Record<string, unknown>): Scenario {
+  const severityRaw = String(raw.severity || 'medium').toLowerCase();
+  const severity: Scenario['severity'] =
+    severityRaw === 'low' || severityRaw === 'high' || severityRaw === 'critical'
+      ? severityRaw
+      : 'medium';
+  return {
+    id: String(raw.id || raw.scenario_type || ''),
+    name: String(raw.name || raw.id || 'Scenario'),
+    description: String(raw.description || ''),
+    severity,
+    expected_agents: Array.isArray(raw.expected_agents) ? (raw.expected_agents as string[]) : [],
+    events_to_inject: Number(raw.events_to_inject) || 0,
+    metrics_to_inject: Number(raw.metrics_to_inject) || 0,
+    estimated_detection_time: String(raw.estimated_detection_time || '1-2 cycles'),
+  };
+}
+
+function normalizeExecution(raw: Record<string, unknown>): ScenarioExecution {
+  return {
+    execution_id: String(raw.execution_id || raw.id || `exec_${Date.now()}`),
+    scenario_type: String(raw.scenario_type || raw.scenario_id || ''),
+    name: String(raw.name || raw.scenario_type || 'Scenario Execution'),
+    status: String(raw.status || 'completed'),
+    started_at: String(raw.started_at || new Date().toISOString()),
+    completed_at: raw.completed_at ? String(raw.completed_at) : null,
+    events_injected: Number(raw.events_injected) || 0,
+    metrics_injected: Number(raw.metrics_injected) || 0,
+    expected_agents: Array.isArray(raw.expected_agents) ? (raw.expected_agents as string[]) : [],
+    system_response_summary: String(
+      raw.system_response_summary || raw.summary || 'Execution captured from backend.'
+    ),
+    agent_findings: Array.isArray(raw.agent_findings)
+      ? (raw.agent_findings as AgentFinding[])
+      : [],
+  };
+}
+
 // ============================================
 // Agent Icon Mapping
 // ============================================
@@ -92,7 +126,7 @@ function generateMockFindings(scenario: Scenario): AgentFinding[] {
   allAgents.forEach((agent, i) => {
     const isExpected = scenario.expected_agents.includes(agent);
     const detected = isExpected || Math.random() > 0.7;
-    const cfg = agentConfig[agent];
+    void agentConfig[agent];
 
     const findingMessages: Record<string, Record<string, string>> = {
       ResourceAgent: {
@@ -649,28 +683,40 @@ export default function ScenariosPage() {
   const [selectedScenario, setSelectedScenario] = useState<Scenario | null>(null);
   const [selectedExecution, setSelectedExecution] = useState<ScenarioExecution | null>(null);
 
-  // Fetch scenarios from mock API
+  const refreshExecutions = useCallback(async () => {
+    try {
+      const history = await fetchScenarioExecutions();
+      const normalized = (history || [])
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((e: any) => normalizeExecution(e as Record<string, unknown>))
+        .sort((a: ScenarioExecution, b: ScenarioExecution) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
+      setExecutions(normalized);
+    } catch {
+      // keep current execution list
+    }
+  }, []);
+
+  // Fetch scenarios from backend
   useEffect(() => {
     const load = async () => {
       try {
         const list = await fetchScenariosApi();
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        setScenarios((list || []).map((s: any) => ({
-          id: String(s.id || ''),
-          name: String(s.name || ''),
-          description: String(s.description || ''),
-          severity: (String(s.severity || 'medium')).toLowerCase() as Scenario['severity'],
-          expected_agents: (s.expected_agents as string[]) || [],
-          events_to_inject: Number(s.events_to_inject) || 0,
-          metrics_to_inject: Number(s.metrics_to_inject) || 0,
-          estimated_detection_time: String(s.estimated_detection_time || '1-2 cycles'),
-        })));
+        setScenarios((list || []).map((s: any) => normalizeScenario(s as Record<string, unknown>)));
+        void refreshExecutions();
       } catch {
         // Fallback
       }
     };
     load();
-  }, []);
+  }, [refreshExecutions]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      void refreshExecutions();
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [refreshExecutions]);
 
   const handleInject = async (scenarioId: string) => {
     setRunningScenario(scenarioId);
@@ -695,7 +741,7 @@ export default function ScenariosPage() {
         : findings.filter(f => f.status === 'detected').length;
 
       const execution: ScenarioExecution = {
-        execution_id: exec.execution_id || `exec_${Math.random().toString(36).slice(2, 10)}`,
+        execution_id: exec.execution_id || `exec_${scenarioId}_${String(exec.started_at || 'injected')}`,
         scenario_type: scenarioId,
         name: exec.name || scenario?.name || scenarioId,
         status: exec.status || data.status || 'completed',
@@ -709,12 +755,16 @@ export default function ScenariosPage() {
           : `Scenario "${scenario?.name}" injected successfully. ${detectedCount} agents detected anomalies.`,
         agent_findings: findings,
       };
-      setExecutions((prev) => [execution, ...prev]);
+      await refreshExecutions();
+      setExecutions((prev) => {
+        if (prev.some((e) => e.execution_id === execution.execution_id)) return prev;
+        return [execution, ...prev];
+      });
     } catch {
       // Fallback: still show results with mock findings
       const findings = scenario ? generateMockFindings(scenario) : [];
       setExecutions((prev) => [{
-        execution_id: `exec_${Math.random().toString(36).slice(2, 10)}`,
+        execution_id: `exec_${scenarioId}_fallback`,
         scenario_type: scenarioId,
         name: scenario?.name || scenarioId,
         status: 'completed',
@@ -748,7 +798,7 @@ export default function ScenariosPage() {
       const updated = [...prev];
       updated[0] = {
         ...updated[0],
-        agent_findings: findings.map((f, i) => ({
+        agent_findings: findings.map((f) => ({
           ...f,
           finding: generateDetailedFinding(f.agent, f.status === 'detected', updated[0].name),
         })),
@@ -756,7 +806,8 @@ export default function ScenariosPage() {
       };
       return updated;
     });
-  }, []);
+    void refreshExecutions();
+  }, [refreshExecutions]);
 
   return (
     <div className="animate-fade-in space-y-6">

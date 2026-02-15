@@ -380,30 +380,45 @@ function AssistantMessage({ message, onFollowUp }: { message: ChatMessage; onFol
         </CollapsibleSection>
 
         {/* Causal chain */}
-        <CollapsibleSection title="Causal Chain" icon={Network} iconColor="#8b5cf6">
+        <CollapsibleSection title="Causal Chain" icon={Network} iconColor="#8b5cf6" defaultOpen={true}>
           <div className="mt-3">
-            <CausalChainInline chain={r.causal_chain} />
-            <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--color-text-muted)]">
-              <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-blue-500" /> Cause</span>
-              <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Effect</span>
-              <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-orange-500" /> Risk</span>
-              <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" /> Outcome</span>
-            </div>
+            {r.causal_chain.length > 0 ? (
+              <>
+                <CausalChainInline chain={r.causal_chain} />
+                <div className="flex items-center gap-3 mt-2 text-[10px] text-[var(--color-text-muted)]">
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-blue-500" /> Cause</span>
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-500" /> Effect</span>
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-orange-500" /> Risk</span>
+                  <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-500" /> Outcome</span>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                No causal chain available for this query. Ask a root-cause question like
+                {' '}<code>&quot;what caused this risk?&quot;</code>.
+              </p>
+            )}
           </div>
         </CollapsibleSection>
 
         {/* Recommended actions */}
-        <CollapsibleSection title="Recommended Actions" icon={CheckCircle} iconColor="#10b981" count={r.recommended_actions.length}>
+        <CollapsibleSection title="Recommended Actions" icon={CheckCircle} iconColor="#10b981" count={r.recommended_actions.length} defaultOpen={true}>
           <div className="space-y-2 mt-3">
-            {r.recommended_actions.map((a, i) => (
-              <div key={i} className="flex items-center gap-3 p-2.5 rounded-lg bg-slate-50">
-                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md ${a.priority === 'high' ? 'bg-red-100 text-red-700' : a.priority === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
-                  {a.priority}
-                </span>
-                <span className="text-sm font-medium text-[var(--color-text-primary)] flex-1">{a.action}</span>
-                <span className="text-xs text-[var(--color-text-muted)]">{a.expected_impact}</span>
-              </div>
-            ))}
+            {r.recommended_actions.length > 0 ? (
+              r.recommended_actions.map((a, i) => (
+                <div key={i} className="flex items-center gap-3 p-2.5 rounded-lg bg-slate-50">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md ${a.priority === 'high' ? 'bg-red-100 text-red-700' : a.priority === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
+                    {a.priority}
+                  </span>
+                  <span className="text-sm font-medium text-[var(--color-text-primary)] flex-1">{a.action}</span>
+                  <span className="text-xs text-[var(--color-text-muted)]">{a.expected_impact}</span>
+                </div>
+              ))
+            ) : (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                No recommended actions generated yet. Run one analysis cycle, then ask again for mitigation steps.
+              </p>
+            )}
           </div>
           <p className="text-[10px] text-[var(--color-text-muted)] mt-2 italic">Actions are suggestive — the system does not auto-remediate.</p>
         </CollapsibleSection>

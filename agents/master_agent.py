@@ -37,6 +37,7 @@ from .compliance_agent import ComplianceAgent
 from .risk_forecast_agent import RiskForecastAgent
 from .causal_agent import CausalAgent
 from .adaptive_baseline_agent import AdaptiveBaselineAgent
+from .code_agent import CodeAgent
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -193,6 +194,7 @@ class MasterAgent:
         self._risk_forecast_agent = RiskForecastAgent()
         self._causal_agent = CausalAgent()
         self._adaptive_baseline_agent = AdaptiveBaselineAgent()
+        self._code_agent = CodeAgent()
 
         # Neo4j graph client (lazy init)
         self._graph = None
@@ -304,6 +306,7 @@ class MasterAgent:
                 pool.submit(self._resource_agent.analyze, metrics, self._state): "resource",
                 pool.submit(self._compliance_agent.analyze, events, self._state): "compliance",
                 pool.submit(self._adaptive_baseline_agent.analyze, metrics, self._state): "baseline",
+                pool.submit(self._code_agent.analyze, events, self._state): "code",
             }
 
             # Collect results as they complete (fastest first)

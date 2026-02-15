@@ -217,7 +217,15 @@ function ResourceUsageChart({ height = 220, resourceTrend }: { height?: number; 
     const memValues: number[] = [];
     const netValues: number[] = [];
 
-    Object.values(resourceTrend).forEach(metrics => {
+    const normalizedTrend = (resourceTrend &&
+      typeof resourceTrend === 'object' &&
+      'resources' in (resourceTrend as unknown as Record<string, unknown>) &&
+      (resourceTrend as unknown as { resources?: Record<string, Array<{metric: string; value: number; timestamp: string}>> }).resources)
+      ? (resourceTrend as unknown as { resources: Record<string, Array<{metric: string; value: number; timestamp: string}>> }).resources
+      : resourceTrend;
+
+    Object.values(normalizedTrend).forEach((metrics) => {
+      if (!Array.isArray(metrics)) return;
       metrics.forEach(m => {
         if (m.metric === 'cpu_percent') cpuValues.push(m.value);
         else if (m.metric === 'memory_percent') memValues.push(m.value);

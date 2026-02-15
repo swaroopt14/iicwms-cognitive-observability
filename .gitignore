@@ -68,5 +68,14 @@ blackboard/evidence_log.jsonl
 events.jsonl
 *.jsonl
 
+# Local DB / runtime state
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Local scratch / accidental dirs
+https:/
+
 # Neo4j
 neo4j-data/
