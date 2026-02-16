@@ -16,7 +16,6 @@ import {
   Download,
   Network,
   Activity,
-  Shield,
   TrendingUp,
   Clock,
   FileText,
@@ -413,6 +412,11 @@ function CausalLinkCard({
           {truncateLabel(link.effect, 28)}
         </span>
       </div>
+      {link.easy_summary && (
+        <div className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+          {link.easy_summary}
+        </div>
+      )}
     </div>
   );
 }
@@ -538,6 +542,29 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
   const competingCauses = allLinks.filter(
     (l) => l.effect === link.effect && l.cause !== link.cause
   ).length;
+  const easyActions = (link.recommended_actions && link.recommended_actions.length > 0)
+    ? link.recommended_actions
+    : [
+        'Contain impact immediately (throttle, isolate, or rollback).',
+        'Fix upstream cause, then retry affected workflow steps.',
+        'Verify two healthy cycles before closing incident.',
+      ];
+  const checklist = link.checklist ?? {
+    do_now: [
+      { owner: 'DevOps', action: easyActions[0] || 'Contain impact immediately.' },
+    ],
+    do_next: [
+      { owner: 'SDE', action: easyActions[1] || 'Fix upstream cause and retry safely.' },
+    ],
+    verify: [
+      { owner: 'Security', action: easyActions[2] || 'Verify stable recovery and compliance.' },
+    ],
+  };
+  const ownerStyles: Record<string, string> = {
+    DevOps: 'bg-blue-100 text-blue-700',
+    SDE: 'bg-indigo-100 text-indigo-700',
+    Security: 'bg-emerald-100 text-emerald-700',
+  };
 
   // Root cause path (find the full chain ending at this link's effect)
   const rootCausePath: string[] = [];
@@ -656,19 +683,49 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
 
           {/* Reasoning */}
           <div>
-            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">Agent Reasoning</div>
+            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">Easy Explanation</div>
             <div className="p-4 bg-slate-50 rounded-xl space-y-3">
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Temporal ordering:</strong> This link was inferred from sequence patterns where <code>{link.cause}</code> appears before <code>{link.effect}</code> in recent cycles.
+                <strong>What happened:</strong>{' '}
+                {link.easy_summary || `${link.cause.replace(/_/g, ' ')} likely led to ${link.effect.replace(/_/g, ' ')}`}.
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Strength score:</strong> CausalAgent assigned <code>{link.confidence}%</code> confidence for this relation based on graph consistency and available evidence IDs.
+                <strong>Why we think this:</strong>{' '}
+                {link.reasoning || `This pattern repeats in recent cycles where ${link.cause} appears before ${link.effect}.`}
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Alternative causes:</strong> {competingCauses === 0
+                <strong>Confidence:</strong> <code>{link.confidence}%</code> (higher means stronger repeated evidence).
+              </p>
+              <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
+                <strong>Competing causes:</strong> {competingCauses === 0
                   ? `No competing causes currently linked to "${link.effect}" in the active graph.`
-                  : `${competingCauses} alternate cause link(s) also target "${link.effect}", so treat this as probable rather than absolute.`}
+                  : `${competingCauses} alternate cause link(s) also target "${link.effect}". Validate against evidence before final decision.`}
               </p>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">Action Checklist</div>
+            <div className="space-y-3">
+              {[
+                { title: 'Do now', items: checklist.do_now, bg: 'bg-red-50 border-red-100', text: 'text-red-900' },
+                { title: 'Do next', items: checklist.do_next, bg: 'bg-amber-50 border-amber-100', text: 'text-amber-900' },
+                { title: 'Verify', items: checklist.verify, bg: 'bg-emerald-50 border-emerald-100', text: 'text-emerald-900' },
+              ].map((group) => (
+                <div key={group.title} className={`p-4 rounded-xl border ${group.bg}`}>
+                  <div className={`text-xs font-semibold uppercase tracking-wider mb-2 ${group.text}`}>{group.title}</div>
+                  <div className="space-y-2">
+                    {group.items.map((item, idx) => (
+                      <div key={`${group.title}_${idx}`} className="text-sm leading-relaxed flex items-start gap-2">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${ownerStyles[item.owner] || 'bg-slate-100 text-slate-700'}`}>
+                          {item.owner}
+                        </span>
+                        <span className={group.text}><strong>{idx + 1}.</strong> {item.action}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -878,8 +935,8 @@ export default function CausalAnalysisPage() {
           <div>
             <div className="font-semibold text-indigo-900 mb-1">How Causal Analysis Works</div>
             <p className="text-sm text-indigo-700 leading-relaxed">
-              The <strong>Causal Agent</strong> analyzes temporal correlations and dependency patterns to infer probable cause-effect relationships.
-              Each link includes a confidence score based on statistical significance. These are <em>probable causes</em>, not mathematically proven causality — designed for decision support, not ground truth.
+              The <strong>Causal Agent</strong> checks event order and known dependency patterns to explain likely cause and effect.
+              Each link includes confidence and evidence IDs so teams can verify quickly and act safely.
             </p>
           </div>
         </div>

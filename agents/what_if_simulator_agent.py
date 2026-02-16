@@ -33,6 +33,35 @@ class WhatIfSimulatorAgent:
         parameters: Dict[str, Any],
         state: SharedState,
     ) -> ScenarioRun:
+        computed = self.compute(
+            scenario_type=scenario_type,
+            parameters=parameters,
+            state=state,
+        )
+
+        latest_cycle_id = state._completed_cycles[-1].cycle_id if state._completed_cycles else None
+        return state.add_scenario_run(
+            scenario_type=computed["scenario_type"],
+            parameters=computed["parameters"],
+            baseline=computed["baseline"],
+            simulated=computed["simulated"],
+            impact_score=computed["impact_score"],
+            assumptions=computed["assumptions"],
+            confidence=computed["confidence"],
+            confidence_reason=computed["confidence_reason"],
+            related_cycle_id=latest_cycle_id,
+        )
+
+    def compute(
+        self,
+        scenario_type: str,
+        parameters: Dict[str, Any],
+        state: SharedState,
+    ) -> Dict[str, Any]:
+        """
+        Compute a deterministic what-if result without persisting.
+        Useful for sandbox/dry-run mode.
+        """
         scenario = scenario_type.upper()
         defaults = dict(self._SCENARIO_DEFAULTS.get(scenario, {}))
         defaults.update(parameters or {})
@@ -61,7 +90,6 @@ class WhatIfSimulatorAgent:
             simulated["risk_index"] = min(100.0, baseline["risk_index"] + min(20.0, ext / 18.0))
             explain_trace.append(f"COMPLIANCE_RELAX extension {ext:.0f}m -> risk +{min(20.0, ext / 18.0):.2f}")
         else:
-            # Unknown scenario: conservative small perturbation only.
             simulated["sla_violations"] += 0.5
             simulated["risk_index"] = min(100.0, baseline["risk_index"] + 5.0)
             explain_trace.append("UNKNOWN scenario fallback -> risk +5.00")
@@ -76,19 +104,16 @@ class WhatIfSimulatorAgent:
             *explain_trace[:5],
         ]
         confidence, reason = self._confidence(scenario, p)
-
-        latest_cycle_id = state._completed_cycles[-1].cycle_id if state._completed_cycles else None
-        return state.add_scenario_run(
-            scenario_type=scenario,
-            parameters=p,
-            baseline=baseline,
-            simulated=simulated,
-            impact_score=impact,
-            assumptions=assumptions,
-            confidence=confidence,
-            confidence_reason=reason,
-            related_cycle_id=latest_cycle_id,
-        )
+        return {
+            "scenario_type": scenario,
+            "parameters": p,
+            "baseline": baseline,
+            "simulated": simulated,
+            "impact_score": impact,
+            "assumptions": assumptions,
+            "confidence": confidence,
+            "confidence_reason": reason,
+        }
 
     def _baseline_metrics(self, state: SharedState) -> Dict[str, float]:
         if not state._completed_cycles:

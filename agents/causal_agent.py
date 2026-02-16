@@ -215,6 +215,13 @@ class CausalAgent:
         time_factor = 1.0 - (candidate.temporal_distance.total_seconds() / 60)  # Closer = higher
         adjusted_confidence = base_confidence * max(0.5, time_factor)
         
+        reasoning = self._build_friendly_reasoning(
+            cause_type=candidate.cause_type,
+            effect_type=candidate.effect_type,
+            temporal_distance=candidate.temporal_distance,
+            base_reason=pattern["reasoning"],
+        )
+
         # Create causal link in blackboard
         link = state.add_causal_link(
             cause=candidate.cause_type,
@@ -222,7 +229,7 @@ class CausalAgent:
             cause_entity=candidate.cause_entity,
             effect_entity=candidate.effect_entity,
             confidence=adjusted_confidence,
-            reasoning=pattern["reasoning"],
+            reasoning=reasoning,
             evidence_ids=candidate.evidence_ids
         )
         
@@ -235,7 +242,7 @@ class CausalAgent:
                     cause_entity=candidate.cause_entity,
                     effect_entity=candidate.effect_entity,
                     confidence=adjusted_confidence,
-                    reasoning=pattern["reasoning"],
+                    reasoning=reasoning,
                 )
             except Exception:
                 pass
@@ -252,3 +259,23 @@ class CausalAgent:
         # Would query state for all links involving entity
         # For now, return empty (would implement with graph queries)
         return []
+
+    def _build_friendly_reasoning(
+        self,
+        cause_type: str,
+        effect_type: str,
+        temporal_distance: timedelta,
+        base_reason: str,
+    ) -> str:
+        """
+        Plain-English explanation for UI and audits.
+        Avoids overly statistical language for operators.
+        """
+        secs = int(max(1, temporal_distance.total_seconds()))
+        cause = cause_type.replace("_", " ").title()
+        effect = effect_type.replace("_", " ").title()
+        return (
+            f"Observed sequence: {cause} happened before {effect} "
+            f"(~{secs}s gap). Likely link: {base_reason}. "
+            "Use linked evidence IDs to validate and act."
+        )

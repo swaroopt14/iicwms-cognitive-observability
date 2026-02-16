@@ -411,31 +411,79 @@ class ReasoningSynthesizer:
 
     def _synthesize_risk_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
         """Synthesize risk status answer."""
-        risk_evidence = [e for e in evidence if e.type in ["risk_signal", "anomaly"]]
-        
-        if not risk_evidence:
-            return "System risk level is normal. No active threats detected."
-        
-        return f"Risk analysis: {risk_evidence[0].summary}"
+        risk_signals = [e for e in evidence if e.type == "risk_signal"]
+        anomalies = [e for e in evidence if e.type == "anomaly"]
+        policy_hits = [e for e in evidence if e.type == "policy_hit"]
 
+        if not risk_signals and not anomalies:
+            return "System risk level is normal. No active threats detected."
+
+        latest = risk_signals[-1] if risk_signals else None
+        top_anoms = [a.summary for a in anomalies[:2]]
+        top_policy = policy_hits[0].summary if policy_hits else "No active policy hit in top evidence."
+
+        summary = (
+            "System risk is rising toward a compliance violation. "
+            "Likely chain: sustained infrastructure pressure -> workflow delays -> SLA stress -> human override risk."
+        )
+        if latest:
+            summary = f"System risk is elevated. Current signal: {latest.summary}."
+
+        checklist = (
+            "Immediate plan (next 15 minutes): "
+            "1) 0-5 min: contain blast radius by throttling non-critical deploys/retries. "
+            "2) 5-10 min: stabilize critical workflows by reducing latency pressure and prioritizing core traffic. "
+            "3) 10-15 min: verify recovery (risk trend down, SLA errors down, no new policy hits) and escalate if not improving."
+        )
+        evidence_bits = []
+        if top_anoms:
+            evidence_bits.append("Top anomaly evidence: " + " | ".join(top_anoms) + ".")
+        evidence_bits.append("Top policy evidence: " + top_policy)
+        return summary + " " + checklist + " " + " ".join(evidence_bits)
+    
     def _synthesize_causal_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
         """Synthesize causal analysis answer."""
-        causal_evidence = [e for e in evidence if e.type in ["causal_link", "anomaly"]]
-        
-        if not causal_evidence:
-            return "No causal relationships identified in current data."
-        
-        causes = [e.summary for e in causal_evidence[:3]]
-        return f"Causal analysis identified: {'; '.join(causes)}"
+        causal = [e for e in evidence if e.type == "causal_link"]
+
+        if not causal:
+            return "No causal relationships have been identified in the current analysis window."
+
+        top = causal[:3]
+        chain = []
+        for c in top:
+            # summary format is generally "CAUSE → EFFECT: reason"
+            rel = c.summary.split(":")[0].strip()
+            chain.append(rel)
+
+        steps = (
+            "Recommended next steps: "
+            "1) Contain impact first, "
+            "2) Fix the upstream cause, "
+            "3) Re-verify that downstream errors and policy risk are decreasing."
+        )
+        return (
+            f"Most likely cause-effect chain: {' | '.join(chain)}. "
+            f"{steps}"
+        )
 
     def _synthesize_compliance_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
         """Synthesize compliance answer."""
         violations = [e for e in evidence if e.type == "policy_hit"]
-        
+
+        total_policies = len(POLICIES)
+        violated = len(set(e.summary.split("'")[1] if "'" in e.summary else "" for e in violations))
+
         if not violations:
-            return f"All {len(POLICIES)} monitored policies are compliant."
-        
-        return f"{len(violations)} policy violations detected: {violations[0].summary}"
+            return f"All {total_policies} monitored policies are currently compliant. No violations detected."
+
+        return (
+            f"{len(violations)} policy violations detected across {violated} policies. "
+            f"Primary issue: {violations[0].summary}. "
+            "Immediate compliance checklist: "
+            "1) Stop the violating write/access path and preserve evidence IDs. "
+            "2) Re-enable approval gates and least-privilege role controls. "
+            "3) Re-run policy checks after mitigation and confirm no repeat hits in the next cycle."
+        )
 
     def _synthesize_workflow_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
         """Synthesize workflow health answer."""

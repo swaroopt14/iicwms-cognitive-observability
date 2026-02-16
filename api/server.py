@@ -298,6 +298,34 @@ class IndustryIncidentBrief(BaseModel):
     top_recommendation: Dict[str, Any]
 
 
+class RunbookAction(BaseModel):
+    action_code: str
+    title: str
+    priority: str
+    owner_team: str
+    rationale: str
+    evidence_ids: List[str]
+    automation_possible: bool
+
+
+class IncidentTaskCreateRequest(BaseModel):
+    provider: Literal["jira", "servicenow"]
+    title: str
+    description: str
+    priority: Literal["P1", "P2", "P3", "P4"] = "P2"
+    action_code: Optional[str] = None
+    cycle_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IncidentTaskResponse(BaseModel):
+    task_id: str
+    provider: str
+    status: str
+    created_at: str
+    payload: Dict[str, Any]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE — Application-scoped singletons
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -316,6 +344,7 @@ _reasoning_task: Optional[asyncio.Task] = None
 _startup_time: Optional[datetime] = None
 _ingest_idempotency_seen: Dict[str, str] = {}
 _ingest_dlq: List[Dict[str, Any]] = []
+_incident_tasks: List[Dict[str, Any]] = []
 _max_ingest_dlq = 1000
 _max_idempotency_keys = 50000
 
@@ -1277,6 +1306,131 @@ async def get_industry_incident_brief():
         business_impact=business_impact,
         top_recommendation=top_recommendation,
     )
+
+
+@app.get("/runbook/actions", tags=["Insights"])
+async def get_runbook_actions(cycle_id: Optional[str] = Query(default=None)):
+    """
+    Return operational runbook actions derived from latest structured recommendations.
+    """
+    cycle = None
+    if cycle_id:
+        cycle = next((c for c in _state._completed_cycles if c.cycle_id == cycle_id), None)
+        if not cycle:
+            raise HTTPException(status_code=404, detail=f"Cycle not found: {cycle_id}")
+    elif _state._completed_cycles:
+        cycle = _state._completed_cycles[-1]
+
+    if not cycle:
+        return {"cycle_id": None, "actions": []}
+
+    actions: List[RunbookAction] = []
+    owner_defaults = {
+        "THROTTLE_DEPLOYS": "devops",
+        "SCALE_OUT": "devops",
+        "DECREASE_CONCURRENCY": "devops",
+        "FIX_STEP_ORDER": "devops",
+        "PIN_RESOURCE_CONFIG": "devops",
+        "BASELINE_REVALIDATE": "devops",
+        "BLOCK_AND_REVIEW": "sde",
+        "REDUCE_COMPLEXITY_BEFORE_RELEASE": "sde",
+        "ENABLE_HOTSPOT_GUARDS": "sde",
+        "ENFORCE_APPROVAL_GATE": "platform",
+        "RESTRICT_AFTER_HOURS_ACCESS": "security",
+        "BLOCK_UNTRUSTED_LOCATION": "security",
+        "ENFORCE_SENSITIVE_WORKFLOW": "security",
+        "DISABLE_SVC_DIRECT_WRITE": "security",
+        "ADD_TESTS_BEFORE_DEPLOY": "sde",
+        "SPLIT_PR_AND_REVIEW": "sde",
+        "INVESTIGATE_ROOT_CAUSE_1": "platform",
+        "CONTAIN_IMPACT_2": "devops",
+        "VERIFY_RECOVERY_3": "platform",
+    }
+    sorted_recs = sorted(cycle.recommendations_v2, key=lambda r: (r.severity_score, r.confidence), reverse=True)
+    for rec in sorted_recs:
+        priority = "P1" if rec.severity_score >= 8.5 else "P2" if rec.severity_score >= 7 else "P3"
+        owner_team = owner_defaults.get(rec.action_code)
+        if not owner_team:
+            if rec.action_code.startswith(("THROTTLE_DEPLOYS", "SCALE_OUT", "DECREASE_CONCURRENCY", "FIX_STEP_ORDER", "PIN_RESOURCE_CONFIG", "BASELINE_REVALIDATE")):
+                owner_team = "devops"
+            elif rec.action_code.startswith(("ADD_TESTS_BEFORE_DEPLOY", "SPLIT_PR_AND_REVIEW", "BLOCK_AND_REVIEW", "REDUCE_COMPLEXITY_BEFORE_RELEASE", "ENABLE_HOTSPOT_GUARDS")):
+                owner_team = "sde"
+            elif rec.action_code.startswith(("RESTRICT_AFTER_HOURS_ACCESS", "ENFORCE_APPROVAL_GATE", "BLOCK_UNTRUSTED_LOCATION", "ENFORCE_SENSITIVE_WORKFLOW", "DISABLE_SVC_DIRECT_WRITE")):
+                owner_team = "security"
+            else:
+                owner_team = "platform"
+        actions.append(
+            RunbookAction(
+                action_code=rec.action_code,
+                title=rec.action_description,
+                priority=priority,
+                owner_team=owner_team,
+                rationale=rec.rationale,
+                evidence_ids=rec.evidence_ids[:10],
+                automation_possible=rec.action_code in {"THROTTLE_DEPLOYS", "DECREASE_CONCURRENCY", "SCALE_OUT"},
+            )
+        )
+
+    return {"cycle_id": cycle.cycle_id, "actions": [a.model_dump() for a in actions[:25]]}
+
+
+@app.post("/incident/tasks/create", response_model=IncidentTaskResponse, tags=["Insights"])
+async def create_incident_task(request: IncidentTaskCreateRequest):
+    """
+    Create a provider-specific task payload (Jira/ServiceNow) from runbook actions.
+    Note: hackathon mode stores records locally and returns payload preview.
+    """
+    now = datetime.utcnow().isoformat()
+    task_id = f"task_{hashlib.sha256(f'{request.provider}:{request.title}:{now}'.encode()).hexdigest()[:10]}"
+
+    base_payload = {
+        "summary": request.title,
+        "description": request.description,
+        "priority": request.priority,
+        "labels": ["chronos", "incident-response", "aiops"],
+        "action_code": request.action_code,
+        "cycle_id": request.cycle_id,
+        "metadata": request.metadata,
+    }
+    if request.provider == "jira":
+        payload = {
+            "fields": {
+                "project": {"key": str(request.metadata.get("project_key", "OPS"))},
+                "issuetype": {"name": str(request.metadata.get("issue_type", "Incident"))},
+                "summary": base_payload["summary"],
+                "description": base_payload["description"],
+                "priority": {"name": request.priority},
+                "labels": base_payload["labels"],
+            }
+        }
+    else:
+        payload = {
+            "short_description": base_payload["summary"],
+            "description": base_payload["description"],
+            "priority": request.priority,
+            "category": "software",
+            "subcategory": "performance",
+            "u_action_code": request.action_code,
+            "u_cycle_id": request.cycle_id,
+        }
+
+    record = {
+        "task_id": task_id,
+        "provider": request.provider,
+        "status": "created",
+        "created_at": now,
+        "payload": payload,
+    }
+    _incident_tasks.append(record)
+    if len(_incident_tasks) > 200:
+        del _incident_tasks[:-200]
+    return IncidentTaskResponse(**record)
+
+
+@app.get("/incident/tasks", tags=["Insights"])
+async def list_incident_tasks(limit: int = Query(default=20, ge=1, le=200)):
+    records = list(reversed(_incident_tasks[-limit:]))
+    return {"tasks": records, "count": len(records)}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2348,6 +2502,13 @@ class WhatIfRequest(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CompositeSandboxRequest(BaseModel):
+    latency_magnitude: float = Field(default=0.7, ge=0.0, le=2.0)
+    workload_multiplier: float = Field(default=2.0, ge=1.0, le=6.0)
+    policy_extension_minutes: int = Field(default=180, ge=0, le=720)
+    history_window_cycles: int = Field(default=5, ge=1, le=50)
+
+
 @app.post("/simulation/what-if", tags=["Simulation"])
 async def run_what_if_simulation(request: WhatIfRequest):
     """
@@ -2372,6 +2533,167 @@ async def run_what_if_simulation(request: WhatIfRequest):
         "assumptions": run.assumptions,
         "related_cycle_id": run.related_cycle_id,
         "created_at": run.created_at.isoformat(),
+    }
+
+
+@app.post("/simulation/what-if/sandbox", tags=["Simulation"])
+async def run_what_if_sandbox(request: WhatIfRequest):
+    """
+    Dry-run what-if simulation.
+    Does NOT persist scenario run to blackboard/history.
+    """
+    if _what_if_agent is None:
+        raise HTTPException(status_code=503, detail="What-if simulator is not initialized")
+    computed = _what_if_agent.compute(
+        scenario_type=request.scenario_type,
+        parameters=request.parameters,
+        state=_state,
+    )
+    return {
+        "mode": "sandbox",
+        "scenario_type": computed["scenario_type"],
+        "parameters": computed["parameters"],
+        "baseline": computed["baseline"],
+        "simulated": computed["simulated"],
+        "impact_score": computed["impact_score"],
+        "confidence": computed["confidence"],
+        "confidence_reason": computed["confidence_reason"],
+        "assumptions": computed["assumptions"],
+        "persisted": False,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/simulation/what-if/sandbox/composite", tags=["Simulation"])
+async def run_composite_what_if_sandbox(request: CompositeSandboxRequest):
+    """
+    Structured composite simulation:
+    combines 3 hypothetical inputs into one deterministic impact projection.
+    Dry-run only (no persistence).
+    """
+    history = _state._completed_cycles[-request.history_window_cycles:] if _state else []
+    if history:
+        baseline_sla = sum(
+            sum(1 for a in c.anomalies if a.type in ("WORKFLOW_DELAY", "MISSING_STEP", "SEQUENCE_VIOLATION"))
+            for c in history
+        ) / len(history)
+        baseline_comp = sum(len(c.policy_hits) for c in history) / len(history)
+        # derive risk proxy from projected states in each cycle
+        risk_rank = {
+            RiskState.NORMAL: 0.0,
+            RiskState.DEGRADED: 25.0,
+            RiskState.AT_RISK: 55.0,
+            RiskState.VIOLATION: 80.0,
+            RiskState.INCIDENT: 95.0,
+        }
+        baseline_risk = 20.0
+        ranks = []
+        for c in history:
+            for rs in c.risk_signals:
+                ranks.append(risk_rank.get(rs.projected_state, 20.0))
+        if ranks:
+            baseline_risk = sum(ranks) / len(ranks)
+    else:
+        baseline_sla, baseline_comp, baseline_risk = 1.0, 0.5, 25.0
+
+    lat = float(request.latency_magnitude)
+    load = float(request.workload_multiplier)
+    pol = float(request.policy_extension_minutes)
+
+    # Structured deterministic contributions.
+    contrib_sla_latency = 3.0 * lat
+    contrib_sla_workload = 4.5 * max(0.0, load - 1.0)
+    contrib_sla_policy = min(2.0, pol / 300.0)
+    delta_sla = contrib_sla_latency + contrib_sla_workload + contrib_sla_policy
+
+    contrib_comp_policy = min(6.0, pol / 120.0)
+    contrib_comp_workload = 0.8 * max(0.0, load - 1.0)
+    contrib_comp_latency = 0.3 * lat
+    delta_comp = contrib_comp_policy + contrib_comp_workload + contrib_comp_latency
+
+    contrib_risk_latency = 14.0 * lat
+    contrib_risk_workload = 12.0 * max(0.0, load - 1.0)
+    contrib_risk_policy = 8.0 * (pol / 180.0)
+    delta_risk = min(45.0, contrib_risk_latency + contrib_risk_workload + contrib_risk_policy)
+
+    sim_sla = baseline_sla + delta_sla
+    sim_comp = baseline_comp + delta_comp
+    sim_risk = min(100.0, baseline_risk + delta_risk)
+
+    wf_norm = min(1.0, max(0.0, delta_sla / 12.0))
+    cv_norm = min(1.0, max(0.0, delta_comp / 8.0))
+    rs_norm = min(1.0, max(0.0, delta_risk / 45.0))
+    impact_score = round((0.4 * wf_norm + 0.35 * cv_norm + 0.25 * rs_norm) * 100.0, 3)
+
+    confidence = 0.88
+    confidence_reason = "Within modeled operating envelope"
+    if lat > 1.5 or load > 4.0 or pol > 480:
+        confidence = 0.65
+        confidence_reason = "Parameter ranges are extrapolative; medium confidence"
+
+    projected_state = "NORMAL"
+    if sim_risk >= 85:
+        projected_state = "INCIDENT"
+    elif sim_risk >= 70:
+        projected_state = "VIOLATION"
+    elif sim_risk >= 50:
+        projected_state = "AT_RISK"
+    elif sim_risk >= 30:
+        projected_state = "DEGRADED"
+
+    return {
+        "mode": "sandbox",
+        "simulation_type": "COMPOSITE_CHANGE_IMPACT",
+        "persisted": False,
+        "parameters": {
+            "latency_magnitude": lat,
+            "workload_multiplier": load,
+            "policy_extension_minutes": int(pol),
+            "history_window_cycles": request.history_window_cycles,
+        },
+        "baseline": {
+            "sla_violations": round(baseline_sla, 3),
+            "compliance_violations": round(baseline_comp, 3),
+            "risk_index": round(baseline_risk, 3),
+        },
+        "simulated": {
+            "sla_violations": round(sim_sla, 3),
+            "compliance_violations": round(sim_comp, 3),
+            "risk_index": round(sim_risk, 3),
+            "projected_state": projected_state,
+        },
+        "impact_score": impact_score,
+        "confidence": confidence,
+        "confidence_reason": confidence_reason,
+        "logic": {
+            "equation": "Impact=100*(0.4*WF_norm + 0.35*CV_norm + 0.25*RISK_norm)",
+            "wf_components": {
+                "latency_component": round(contrib_sla_latency, 3),
+                "workload_component": round(contrib_sla_workload, 3),
+                "policy_component": round(contrib_sla_policy, 3),
+            },
+            "cv_components": {
+                "policy_component": round(contrib_comp_policy, 3),
+                "workload_component": round(contrib_comp_workload, 3),
+                "latency_component": round(contrib_comp_latency, 3),
+            },
+            "risk_components": {
+                "latency_component": round(contrib_risk_latency, 3),
+                "workload_component": round(contrib_risk_workload, 3),
+                "policy_component": round(contrib_risk_policy, 3),
+            },
+            "normalized_terms": {
+                "WF_norm": round(wf_norm, 3),
+                "CV_norm": round(cv_norm, 3),
+                "RISK_norm": round(rs_norm, 3),
+            },
+        },
+        "assumptions": [
+            "Dry-run only; no writes to observation or blackboard",
+            "Deterministic weighting model; no stochastic forecasting",
+            "Baseline estimated from recent completed cycles",
+        ],
+        "created_at": datetime.utcnow().isoformat(),
     }
 
 
@@ -3273,6 +3595,73 @@ async def get_compliance_summary():
 @app.get("/causal/links", tags=["Causal"])
 async def get_causal_links():
     """Get causal links from recent cycles (used by causal-analysis page)."""
+    def _easy_actions(cause: str, effect: str) -> List[str]:
+        key = f"{cause}->{effect}".upper()
+        if "SUSTAINED_RESOURCE_CRITICAL->WORKFLOW_DELAY" in key:
+            return [
+                "Throttle non-critical deploy/workflow concurrency now.",
+                "Stabilize the affected resource (CPU/memory/network) and cap retries.",
+                "Re-run delayed workflow step and confirm SLA trend is improving.",
+            ]
+        if "MISSING_STEP->SILENT" in key or "SEQUENCE_VIOLATION->AT_RISK" in key:
+            return [
+                "Pause promotion and restore missing/ordered approval steps.",
+                "Re-run pipeline from last valid checkpoint with audit logging on.",
+                "Confirm no new policy hits before resuming normal flow.",
+            ]
+        return [
+            "Contain impact first (throttle, isolate, or rollback).",
+            "Fix the upstream cause before retrying downstream workflow.",
+            "Verify recovery for two cycles with no new risk escalation.",
+        ]
+
+    def _checklist(cause: str, effect: str) -> Dict[str, List[Dict[str, str]]]:
+        key = f"{cause}->{effect}".upper()
+        if "SUSTAINED_RESOURCE_CRITICAL->WORKFLOW_DELAY" in key:
+            return {
+                "do_now": [
+                    {"owner": "DevOps", "action": "Throttle non-critical deploy/workflow concurrency on impacted nodes."},
+                    {"owner": "Security", "action": "Temporarily enforce stricter approval for risky production overrides."},
+                ],
+                "do_next": [
+                    {"owner": "DevOps", "action": "Stabilize resource pressure (CPU/memory/network) and cap retries/timeouts."},
+                    {"owner": "SDE", "action": "Fix hotspot code path or deployment config causing workload pressure."},
+                ],
+                "verify": [
+                    {"owner": "DevOps", "action": "Confirm latency/error/SLA trends improve for 2 consecutive cycles."},
+                    {"owner": "Security", "action": "Confirm no new policy hits occurred during mitigation window."},
+                ],
+            }
+        if "MISSING_STEP->SILENT" in key or "SEQUENCE_VIOLATION->AT_RISK" in key:
+            return {
+                "do_now": [
+                    {"owner": "SDE", "action": "Pause promotion and restore missing/ordered approval steps."},
+                    {"owner": "Security", "action": "Block policy-bypassing path until approval gates are active."},
+                ],
+                "do_next": [
+                    {"owner": "SDE", "action": "Re-run pipeline from last compliant checkpoint with full trace IDs."},
+                    {"owner": "DevOps", "action": "Reduce pipeline concurrency to avoid repeat unstable executions."},
+                ],
+                "verify": [
+                    {"owner": "Security", "action": "Verify compliance policies are passing after rerun."},
+                    {"owner": "DevOps", "action": "Verify no fresh risk escalation in next two cycles."},
+                ],
+            }
+        return {
+            "do_now": [
+                {"owner": "DevOps", "action": "Contain blast radius (throttle, isolate, or rollback impacted path)."},
+                {"owner": "Security", "action": "Tighten temporary controls to prevent unsafe manual overrides."},
+            ],
+            "do_next": [
+                {"owner": "SDE", "action": "Fix upstream root-cause trigger and prepare safe patch/redeploy plan."},
+                {"owner": "DevOps", "action": "Re-run affected workflow steps with guardrails enabled."},
+            ],
+            "verify": [
+                {"owner": "DevOps", "action": "Confirm risk/SLA metrics are recovering for two cycles."},
+                {"owner": "Security", "action": "Confirm no new compliance violations are observed."},
+            ],
+        }
+
     all_links = []
     for cycle in _state._completed_cycles[-20:]:
         for c in cycle.causal_links:
@@ -3282,6 +3671,10 @@ async def get_causal_links():
                 "effect": c.effect,
                 "confidence": round(c.confidence * 100, 1) if c.confidence <= 1 else round(c.confidence, 1),
                 "agent": "CausalAgent",
+                "reasoning": c.reasoning,
+                "easy_summary": f"{c.cause.replace('_', ' ').title()} likely led to {c.effect.replace('_', ' ').title()}",
+                "recommended_actions": _easy_actions(c.cause, c.effect),
+                "checklist": _checklist(c.cause, c.effect),
                 "timestamp": c.timestamp.isoformat(),
                 "evidence_ids": getattr(c, "evidence", []),
             })
