@@ -23,7 +23,7 @@ This is why the system is smarter than Datadog.
 """
 
 from datetime import datetime
-from rag.query_engine import get_rag_engine
+from rag.query_engine import get_rag_engine, RAGResponse
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 import uuid

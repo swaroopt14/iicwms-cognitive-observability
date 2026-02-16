@@ -19,12 +19,15 @@ This is why the system is smarter than Datadog.
 """
 
 import re
-from .vector_store import ChronosVectorStore
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 import os
+try:
+    from .vector_store import ChronosVectorStore
+except ModuleNotFoundError:
+    ChronosVectorStore = None
 
 from blackboard import (
     SharedState, ReasoningCycle,
@@ -279,7 +282,7 @@ class ReasoningSynthesizer:
     def __init__(self, state: SharedState, observation: ObservationLayer):
         self._state = state
         self._observation = observation
-        self._vector_store = ChronosVectorStore()
+        self._vector_store = ChronosVectorStore() if ChronosVectorStore else None
     
     def retrieve_evidence(
         self,
@@ -289,35 +292,36 @@ class ReasoningSynthesizer:
         """Retrieve relevant evidence using semantic search."""
         evidence = []
         
-        # Use semantic search instead of keyword matching
         query_text = " ".join(decomposition.sub_queries)
-        vector_results = self._vector_store.semantic_search(query_text, n_results=10)
-        
-        # Convert vector results to Evidence objects
-        for result in vector_results:
-            metadata = result["metadata"]
-            
-            evidence.append(Evidence(
-                id=result["id"],
-                type=metadata["type"],
-                source_agent=metadata.get("agent", "Unknown"),
-                summary=result["content"],
-                confidence=metadata.get("confidence", 0.8),
-                timestamp=metadata["timestamp"]
-            ))
+        if self._vector_store:
+            vector_results = self._vector_store.semantic_search(query_text, n_results=10)
+
+            # Convert vector results to Evidence objects
+            for result in vector_results:
+                metadata = result["metadata"]
+
+                evidence.append(Evidence(
+                    id=result["id"],
+                    type=metadata["type"],
+                    source_agent=metadata.get("agent", "Unknown"),
+                    summary=result["content"],
+                    confidence=metadata.get("confidence", 0.8),
+                    timestamp=metadata["timestamp"]
+                ))
         
         # Also add recent cycle data for freshness
         for cycle in cycles[-2:]:  # Last 2 cycles only
             # Anomalies
             for anomaly in cycle.anomalies:
                 # Add to vector store for future searches
-                self._vector_store.add_anomaly(
-                    anomaly.anomaly_id,
-                    anomaly.description,
-                    anomaly.agent,
-                    anomaly.confidence,
-                    anomaly.timestamp
-                )
+                if self._vector_store:
+                    self._vector_store.add_anomaly(
+                        anomaly.anomaly_id,
+                        anomaly.description,
+                        anomaly.agent,
+                        anomaly.confidence,
+                        anomaly.timestamp
+                    )
                 
                 # Add to current evidence if relevant
                 if self._is_semantically_relevant(anomaly.description, query_text):
@@ -333,12 +337,13 @@ class ReasoningSynthesizer:
             # Policy hits
             for hit in cycle.policy_hits:
                 # Add to vector store
-                self._vector_store.add_policy_hit(
-                    hit.hit_id,
-                    hit.description,
-                    hit.policy_id,
-                    hit.timestamp
-                )
+                if self._vector_store:
+                    self._vector_store.add_policy_hit(
+                        hit.hit_id,
+                        hit.description,
+                        hit.policy_id,
+                        hit.timestamp
+                    )
                 
                 # Add to current evidence if relevant
                 if self._is_semantically_relevant(hit.description, query_text):
@@ -354,13 +359,14 @@ class ReasoningSynthesizer:
             # Recommendations
             for rec in cycle.recommendations:
                 # Add to vector store
-                self._vector_store.add_recommendation(
-                    rec.rec_id,
-                    rec.cause,
-                    rec.action,
-                    rec.urgency,
-                    rec.timestamp
-                )
+                if self._vector_store:
+                    self._vector_store.add_recommendation(
+                        rec.rec_id,
+                        rec.cause,
+                        rec.action,
+                        rec.urgency,
+                        rec.timestamp
+                    )
         
         return evidence
     
@@ -474,7 +480,7 @@ class AgenticRAGEngine:
         self._observation = observation or get_observation_layer()
         self._decomposer = QueryDecomposerAgent()
         self._synthesizer = ReasoningSynthesizer(self._state, self._observation)
-        self._vector_store = ChronosVectorStore()
+        self._vector_store = ChronosVectorStore() if ChronosVectorStore else None
     
     def query(self, query_text: str) -> RAGResponse:
         """Process a reasoning query with enhanced semantic search."""
@@ -512,4 +518,8 @@ class AgenticRAGEngine:
         return min(total_confidence / len(evidence), 1.0)
 
 
-# Singleton removed - now handled in __init__.py
+def get_rag_engine() -> AgenticRAGEngine:
+    """Compatibility singleton accessor used by existing agents."""
+    if not hasattr(get_rag_engine, "_instance"):
+        get_rag_engine._instance = AgenticRAGEngine()
+    return get_rag_engine._instance
