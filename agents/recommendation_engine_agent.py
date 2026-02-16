@@ -17,6 +17,7 @@ from blackboard import (
     SeverityScore,
     RecommendationV2,
 )
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 @dataclass(frozen=True)
@@ -290,8 +291,36 @@ class RecommendationEngineAgent:
             for rule in self._RULES:
                 by_issue.setdefault(rule.issue_type, []).append(rule)
             self.__class__._RULES_BY_ISSUE = by_issue
+        self._use_langgraph = is_langgraph_enabled()
 
     def generate(
+        self,
+        anomalies: List[Anomaly],
+        policy_hits: List[PolicyHit],
+        causal_links: List[CausalLink],
+        severity_scores: List[SeverityScore],
+        state: SharedState,
+    ) -> List[RecommendationV2]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {
+                    "anomalies": anomalies,
+                    "policy_hits": policy_hits,
+                    "causal_links": causal_links,
+                    "severity_scores": severity_scores,
+                    "state": state,
+                    "outputs": [],
+                },
+                [
+                    ("recommend_from_anomalies", self._graph_recommend_from_anomalies),
+                    ("recommend_from_policies", self._graph_recommend_from_policies),
+                    ("rank_recommendations", self._graph_rank_recommendations),
+                ],
+            )
+            return graph_state.get("outputs", [])
+        return self._generate_core(anomalies, policy_hits, causal_links, severity_scores, state)
+
+    def _generate_core(
         self,
         anomalies: List[Anomaly],
         policy_hits: List[PolicyHit],
@@ -423,6 +452,37 @@ class RecommendationEngineAgent:
                 )
         outputs.sort(key=lambda r: (r.severity_score, r.confidence), reverse=True)
         return outputs[:40]
+
+    def _graph_recommend_from_anomalies(self, graph_state: Dict[str, object]) -> Dict[str, object]:
+        outputs = self._generate_core(
+            anomalies=graph_state["anomalies"],  # type: ignore[arg-type]
+            policy_hits=[],
+            causal_links=graph_state["causal_links"],  # type: ignore[arg-type]
+            severity_scores=graph_state["severity_scores"],  # type: ignore[arg-type]
+            state=graph_state["state"],  # type: ignore[arg-type]
+        )
+        graph_state["outputs"] = outputs
+        return graph_state
+
+    def _graph_recommend_from_policies(self, graph_state: Dict[str, object]) -> Dict[str, object]:
+        outputs = graph_state.get("outputs", [])
+        outputs.extend(
+            self._generate_core(
+                anomalies=[],
+                policy_hits=graph_state["policy_hits"],  # type: ignore[arg-type]
+                causal_links=graph_state["causal_links"],  # type: ignore[arg-type]
+                severity_scores=graph_state["severity_scores"],  # type: ignore[arg-type]
+                state=graph_state["state"],  # type: ignore[arg-type]
+            )
+        )
+        graph_state["outputs"] = outputs
+        return graph_state
+
+    def _graph_rank_recommendations(self, graph_state: Dict[str, object]) -> Dict[str, object]:
+        outputs = graph_state.get("outputs", [])
+        outputs.sort(key=lambda r: (r.severity_score, r.confidence), reverse=True)  # type: ignore[attr-defined]
+        graph_state["outputs"] = outputs[:40]
+        return graph_state
 
     def _rules_for_issue(self, issue_type: str) -> List[RecommendationRule]:
         return self._RULES_BY_ISSUE.get(issue_type, [])

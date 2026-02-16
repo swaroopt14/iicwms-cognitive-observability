@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from blackboard import SharedState, ScenarioRun, RiskState
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 class WhatIfSimulatorAgent:
@@ -26,6 +27,9 @@ class WhatIfSimulatorAgent:
         "WORKLOAD_SURGE": {"multiplier": 2.0, "duration_minutes": 15},
         "COMPLIANCE_RELAX": {"minutes_extension": 180, "duration_minutes": 30},
     }
+
+    def __init__(self):
+        self._use_langgraph = is_langgraph_enabled()
 
     def run(
         self,
@@ -53,6 +57,35 @@ class WhatIfSimulatorAgent:
         )
 
     def compute(
+        self,
+        scenario_type: str,
+        parameters: Dict[str, Any],
+        state: SharedState,
+    ) -> Dict[str, Any]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {
+                    "scenario_type": scenario_type,
+                    "parameters": parameters,
+                    "state": state,
+                    "scenario": "",
+                    "normalized": {},
+                    "baseline": {},
+                    "simulated": {},
+                    "trace": [],
+                },
+                [
+                    ("normalize", self._graph_normalize),
+                    ("baseline", self._graph_baseline),
+                    ("simulate", self._graph_simulate),
+                    ("context", self._graph_context),
+                    ("finalize", self._graph_finalize),
+                ],
+            )
+            return graph_state["result"]
+        return self._compute_core(scenario_type, parameters, state)
+
+    def _compute_core(
         self,
         scenario_type: str,
         parameters: Dict[str, Any],
@@ -114,6 +147,83 @@ class WhatIfSimulatorAgent:
             "confidence": confidence,
             "confidence_reason": reason,
         }
+
+    def _graph_normalize(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        scenario = graph_state["scenario_type"].upper()
+        defaults = dict(self._SCENARIO_DEFAULTS.get(scenario, {}))
+        defaults.update(graph_state.get("parameters") or {})
+        graph_state["scenario"] = scenario
+        graph_state["normalized"] = self._normalize_parameters(defaults)
+        graph_state["trace"] = []
+        return graph_state
+
+    def _graph_baseline(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        baseline = self._baseline_metrics(graph_state["state"])
+        graph_state["baseline"] = baseline
+        graph_state["simulated"] = dict(baseline)
+        return graph_state
+
+    def _graph_simulate(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        scenario = graph_state["scenario"]
+        p = graph_state["normalized"]
+        baseline = graph_state["baseline"]
+        simulated = graph_state["simulated"]
+        explain_trace = graph_state["trace"]
+
+        if scenario == "LATENCY_SPIKE":
+            magnitude = float(p.get("magnitude", 0.5))
+            simulated["sla_violations"] += max(1.0, 4.0 * magnitude)
+            simulated["compliance_violations"] += max(0.0, 1.0 * magnitude)
+            simulated["risk_index"] = min(100.0, baseline["risk_index"] + 25.0 * magnitude)
+            explain_trace.append(f"LATENCY_SPIKE magnitude {magnitude:.2f} -> risk +{25.0 * magnitude:.2f}")
+        elif scenario == "WORKLOAD_SURGE":
+            mult = float(p.get("multiplier", 2.0))
+            simulated["sla_violations"] += max(1.0, (mult - 1.0) * 6.0)
+            simulated["compliance_violations"] += max(0.0, (mult - 1.0) * 1.5)
+            simulated["risk_index"] = min(100.0, baseline["risk_index"] + (mult - 1.0) * 18.0)
+            explain_trace.append(f"WORKLOAD_SURGE multiplier {mult:.2f} -> risk +{(mult - 1.0) * 18.0:.2f}")
+        elif scenario == "COMPLIANCE_RELAX":
+            ext = float(p.get("minutes_extension", 180))
+            simulated["sla_violations"] += 0.5
+            simulated["compliance_violations"] += min(6.0, ext / 90.0)
+            simulated["risk_index"] = min(100.0, baseline["risk_index"] + min(20.0, ext / 18.0))
+            explain_trace.append(f"COMPLIANCE_RELAX extension {ext:.0f}m -> risk +{min(20.0, ext / 18.0):.2f}")
+        else:
+            simulated["sla_violations"] += 0.5
+            simulated["risk_index"] = min(100.0, baseline["risk_index"] + 5.0)
+            explain_trace.append("UNKNOWN scenario fallback -> risk +5.00")
+
+        return graph_state
+
+    def _graph_context(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        self._apply_context_modifiers(graph_state["simulated"], graph_state["normalized"], graph_state["trace"])
+        return graph_state
+
+    def _graph_finalize(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        scenario = graph_state["scenario"]
+        p = graph_state["normalized"]
+        baseline = graph_state["baseline"]
+        simulated = graph_state["simulated"]
+        explain_trace = graph_state["trace"]
+        impact = self._impact_score(baseline, simulated)
+        assumptions = [
+            "Read-only simulation: no writes to Observation layer",
+            "Uses deterministic rules; not probabilistic forecasting",
+            "Impact is delta vs latest observed baseline",
+            *explain_trace[:5],
+        ]
+        confidence, reason = self._confidence(scenario, p)
+        graph_state["result"] = {
+            "scenario_type": scenario,
+            "parameters": p,
+            "baseline": baseline,
+            "simulated": simulated,
+            "impact_score": impact,
+            "assumptions": assumptions,
+            "confidence": confidence,
+            "confidence_reason": reason,
+        }
+        return graph_state
 
     def _baseline_metrics(self, state: SharedState) -> Dict[str, float]:
         if not state._completed_cycles:

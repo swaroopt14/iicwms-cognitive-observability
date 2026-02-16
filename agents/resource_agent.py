@@ -23,6 +23,7 @@ import statistics
 
 from observation import ObservedMetric
 from blackboard import SharedState, Anomaly
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 # Thresholds
@@ -87,8 +88,54 @@ class ResourceAgent:
     def __init__(self):
         # Track resource history: resource_id -> metric -> history
         self._history: Dict[str, Dict[str, ResourceHistory]] = defaultdict(dict)
+        self._use_langgraph = is_langgraph_enabled()
     
     def analyze(
+        self,
+        metrics: List[ObservedMetric],
+        state: SharedState
+    ) -> List[Anomaly]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {"metrics": metrics, "state": state, "anomalies": []},
+                [
+                    ("ingest_resource_metrics", self._graph_ingest_metrics),
+                    ("evaluate_resource_anomalies", self._graph_evaluate_anomalies),
+                ],
+            )
+            return graph_state.get("anomalies", [])
+        return self._analyze_core(metrics, state)
+
+    def _graph_ingest_metrics(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        metrics = graph_state["metrics"]
+        for metric in metrics:
+            if metric.metric not in THRESHOLDS:
+                continue
+            if metric.metric not in self._history[metric.resource_id]:
+                self._history[metric.resource_id][metric.metric] = ResourceHistory(
+                    resource_id=metric.resource_id,
+                    metric=metric.metric,
+                )
+            history = self._history[metric.resource_id][metric.metric]
+            history.add(metric.timestamp, metric.value)
+        return graph_state
+
+    def _graph_evaluate_anomalies(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        anomalies: List[Anomaly] = []
+        state = graph_state["state"]
+        for resource_id, metrics_dict in self._history.items():
+            for metric_name, history in metrics_dict.items():
+                threshold_config = THRESHOLDS[metric_name]
+                anomaly = self._check_sustained_spike(resource_id, metric_name, history, threshold_config, state)
+                if anomaly:
+                    anomalies.append(anomaly)
+                anomaly = self._check_drift_trend(resource_id, metric_name, history, threshold_config, state)
+                if anomaly:
+                    anomalies.append(anomaly)
+        graph_state["anomalies"] = anomalies
+        return graph_state
+
+    def _analyze_core(
         self,
         metrics: List[ObservedMetric],
         state: SharedState

@@ -27,8 +27,10 @@ LLMs are used ONLY for explanation wording, NEVER for detection.
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
+from collections import Counter
 import os
 import logging
+import re
 
 from blackboard import (
     ReasoningCycle, Anomaly, PolicyHit, RiskSignal,
@@ -166,7 +168,7 @@ class ExplanationEngine:
         
         return Insight(
             insight_id=f"insight_{cycle.cycle_id}",
-            summary=explanation["summary"],
+            summary=self._build_structured_summary(cycle),
             why_it_matters=explanation["why_it_matters"],
             what_will_happen_if_ignored=explanation["what_will_happen_if_ignored"],
             recommended_actions=actions,
@@ -279,23 +281,7 @@ class ExplanationEngine:
         severity: str
     ) -> Dict[str, str]:
         """Generate explanation using templates (deterministic)."""
-        
-        # Build summary
-        summary_parts = []
-        
-        if cycle.anomalies:
-            anomaly_types = set(a.type for a in cycle.anomalies)
-            summary_parts.append(f"{len(cycle.anomalies)} anomalies detected ({', '.join(anomaly_types)})")
-        
-        if cycle.policy_hits:
-            policy_ids = set(h.policy_id for h in cycle.policy_hits)
-            summary_parts.append(f"{len(cycle.policy_hits)} policy violations ({', '.join(policy_ids)})")
-        
-        if cycle.risk_signals:
-            risk_entities = [s.entity for s in cycle.risk_signals]
-            summary_parts.append(f"Risk escalation detected for: {', '.join(risk_entities[:3])}")
-        
-        summary = ". ".join(summary_parts) if summary_parts else "System operating normally"
+        summary = self._build_structured_summary(cycle)
         
         # Build why it matters
         why_parts = []
@@ -335,6 +321,66 @@ class ExplanationEngine:
             "why_it_matters": why_it_matters,
             "what_will_happen_if_ignored": what_if_ignored
         }
+
+    def _build_structured_summary(self, cycle: ReasoningCycle) -> str:
+        """Readable one-line summary for cards and feeds."""
+        sections: List[str] = []
+
+        if cycle.anomalies:
+            anomaly_counter = Counter(a.type for a in cycle.anomalies)
+            sections.append(
+                f"Anomalies: {len(cycle.anomalies)} total ({self._format_top_counts(anomaly_counter, max_items=5)})"
+            )
+
+        if cycle.policy_hits:
+            policy_counter = Counter(h.policy_id for h in cycle.policy_hits)
+            sections.append(
+                f"Policy Violations: {len(cycle.policy_hits)} total ({self._format_top_counts(policy_counter, max_items=3)})"
+            )
+
+        if cycle.risk_signals:
+            entities = self._clean_risk_entities([s.entity for s in cycle.risk_signals])
+            if entities:
+                sections.append(f"Risk Escalation: {', '.join(entities[:3])}")
+            else:
+                sections.append("Risk Escalation: active signals detected")
+
+        if not sections:
+            return "System Status: Normal (no anomalies, policy violations, or active risk escalation)."
+
+        return " | ".join(sections)
+
+    def _format_top_counts(self, counts: Counter, max_items: int = 5) -> str:
+        """Compact 'TYPE xN' list with tail compression."""
+        if not counts:
+            return "none"
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        top = ranked[:max_items]
+        rendered = [f"{name} x{count}" for name, count in top]
+        remaining = sum(count for _, count in ranked[max_items:])
+        if remaining > 0:
+            rendered.append(f"+{remaining} more")
+        return ", ".join(rendered)
+
+    def _clean_risk_entities(self, entities: List[str]) -> List[str]:
+        """Remove malformed/truncated entities and normalize values."""
+        cleaned: List[str] = []
+        seen = set()
+        for raw in entities:
+            e = (raw or "").strip()
+            if not e:
+                continue
+            # Drop obvious placeholders/truncated values like "vm_" or "policy_context_".
+            if e.endswith("_") or e in {"unknown", "n/a"}:
+                continue
+            if e.startswith("policy_context_"):
+                continue
+            if not re.search(r"[A-Za-z0-9]", e):
+                continue
+            if e not in seen:
+                seen.add(e)
+                cleaned.append(e)
+        return cleaned
     
     def _generate_llm_explanation(
         self,

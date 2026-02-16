@@ -8,6 +8,7 @@
 
 ## Table of Contents
 
+0A. [Latest Implementation Updates (2026-02-16)](#0a-latest-implementation-updates-2026-02-16)
 0. [Project Structure](#0-project-structure)
 1. [Problem Understanding & Scope](#1-problem-understanding--scope)
 2. [System Objectives & Success Criteria](#2-system-objectives--success-criteria)
@@ -25,6 +26,51 @@
 14. [Evaluation Criteria Mapping](#14-evaluation-criteria-mapping)
 15. [Future Scope & Extensibility](#15-future-scope--extensibility)
 16. [Enterprise Case Studies & ROI](#16-enterprise-case-studies--roi)
+
+---
+
+## 0A. Latest Implementation Updates (2026-02-16)
+
+This section captures what was implemented in the current engineering iteration.
+
+### A. LangGraph Across the Reasoning Layer
+
+- Added shared graph runtime helper: `agents/langgraph_runtime.py`
+- Implemented LangGraph execution path with deterministic fallback in:
+  - `workflow_agent.py`
+  - `resource_agent.py`
+  - `compliance_agent.py`
+  - `adaptive_baseline_agent.py`
+  - `code_agent.py`
+  - `risk_forecast_agent.py`
+  - `causal_agent.py`
+  - `severity_engine_agent.py`
+  - `recommendation_engine_agent.py`
+  - `what_if_simulator_agent.py`
+  - `scenario_injection_agent.py`
+- `master_agent.py` continues to orchestrate full-cycle graph execution with automatic fallback.
+
+### B. Ask Chronos / Query Improvements
+
+- Improved query synthesis and response quality in:
+  - `agents/query_agent.py`
+  - `rag/query_engine.py`
+- Query path now consistently returns orchestrator mode and improved recommendation extraction.
+
+### C. Insight Summary Clarity Upgrade
+
+- Replaced long, hard-to-read summary strings with structured output in `explanation/engine.py`.
+- New insight summary format:
+  - `Anomalies: <count> total (<top types with counts>)`
+  - `Policy Violations: <count> total (<top policy IDs>)`
+  - `Risk Escalation: <top entities>`
+- Added cleanup for malformed risk entities and summary compression (`+N more`).
+
+### D. Runtime Flags (Local)
+
+- `ENABLE_LANGGRAPH=true`
+- `ENABLE_LANGGRAPH_AGENTS=true`
+- `ENABLE_VECTOR_STORE=false` (recommended for stable local runs)
 
 ---
 

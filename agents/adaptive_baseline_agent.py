@@ -38,6 +38,7 @@ from collections import defaultdict
 
 from blackboard import SharedState, Anomaly
 from observation import ObservedMetric
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 AGENT_NAME = "AdaptiveBaselineAgent"
@@ -145,8 +146,26 @@ class AdaptiveBaselineAgent:
         # Nested dict: entity -> metric -> BaselineProfile
         self._baselines: Dict[str, Dict[str, BaselineProfile]] = defaultdict(dict)
         self._deviation_history: List[BaselineDeviation] = []
+        self._use_langgraph = is_langgraph_enabled()
 
     def analyze(
+        self,
+        metrics: List[ObservedMetric],
+        state: SharedState,
+    ) -> List[Anomaly]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {"metrics": metrics, "state": state, "anomalies": []},
+                [("baseline_detect", self._graph_baseline_detect)],
+            )
+            return graph_state.get("anomalies", [])
+        return self._analyze_core(metrics, state)
+
+    def _graph_baseline_detect(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["anomalies"] = self._analyze_core(graph_state["metrics"], graph_state["state"])
+        return graph_state
+
+    def _analyze_core(
         self,
         metrics: List[ObservedMetric],
         state: SharedState,

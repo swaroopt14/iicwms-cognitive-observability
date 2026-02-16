@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from observation import ObservedEvent
 from blackboard import SharedState, Anomaly
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 # Expected workflow definitions (should match simulator)
@@ -89,8 +90,26 @@ class WorkflowAgent:
     def __init__(self):
         # Track active workflows
         self._workflows: Dict[str, WorkflowState] = {}
+        self._use_langgraph = is_langgraph_enabled()
     
     def analyze(
+        self,
+        events: List[ObservedEvent],
+        state: SharedState
+    ) -> List[Anomaly]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {"events": events, "state": state, "anomalies": []},
+                [("detect_workflow_anomalies", self._graph_detect_workflow_anomalies)],
+            )
+            return graph_state.get("anomalies", [])
+        return self._analyze_core(events, state)
+
+    def _graph_detect_workflow_anomalies(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["anomalies"] = self._analyze_core(graph_state["events"], graph_state["state"])
+        return graph_state
+
+    def _analyze_core(
         self,
         events: List[ObservedEvent],
         state: SharedState

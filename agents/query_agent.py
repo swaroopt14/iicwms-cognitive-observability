@@ -199,7 +199,7 @@ class QueryAgent:
                     "id": a.anomaly_id,
                     "type": "anomaly",
                     "summary": a.description,
-                    "confidence": a.confidence,
+                    "confidence": self._to_percent(a.confidence),
                     "agent": a.agent,
                 })
             for h in latest_cycle.policy_hits[:2]:
@@ -207,7 +207,7 @@ class QueryAgent:
                     "id": h.hit_id,
                     "type": "policy_hit",
                     "summary": h.description,
-                    "confidence": 0.9,
+                    "confidence": 90.0,
                     "agent": h.agent,
                 })
             for r in latest_cycle.risk_signals[:1]:
@@ -215,7 +215,7 @@ class QueryAgent:
                     "id": r.signal_id,
                     "type": "risk_signal",
                     "summary": r.reasoning,
-                    "confidence": r.confidence,
+                    "confidence": self._to_percent(r.confidence),
                     "agent": "RiskForecastAgent",
                 })
 
@@ -237,7 +237,7 @@ class QueryAgent:
                 {"label": "Potential incident/customer impact", "type": "outcome"},
             ],
             recommended_actions=recs,
-            confidence=0.86 if projected_state in ("VIOLATION", "INCIDENT") else 0.78,
+            confidence=86.0 if projected_state in ("VIOLATION", "INCIDENT") else 78.0,
             time_horizon="Next 15 minutes",
             uncertainty="Checklist is deterministic; validate against live telemetry each cycle.",
             query_type="ops_checklist",
@@ -256,7 +256,7 @@ class QueryAgent:
                     agent=self.AGENT_NAME,
                     claim=f"Ops checklist generated for {projected_state} impact {impact_score:.0f}",
                     evidence_ids=[e["id"] for e in evidence[:5]],
-                    confidence=result.confidence,
+                    confidence=min(1.0, result.confidence / 100.0),
                 )
             except RuntimeError:
                 pass
@@ -280,6 +280,7 @@ class QueryAgent:
             query_id = f"qry_{uuid.uuid4().hex[:8]}"
             answer = crew_output["answer"]
             confidence = crew_output.get("confidence", 0.7)
+            confidence_pct = self._to_percent(confidence)
 
             result = QueryResult(
                 query_id=query_id,
@@ -292,7 +293,7 @@ class QueryAgent:
                     {"action": a, "expected_impact": "", "priority": "medium"}
                     for a in crew_output.get("recommended_actions", [])
                 ],
-                confidence=confidence,
+                confidence=confidence_pct,
                 time_horizon="Current state",
                 uncertainty="Analysis powered by CrewAI multi-agent reasoning",
                 query_type="crewai",
@@ -308,7 +309,7 @@ class QueryAgent:
                         agent=self.AGENT_NAME,
                         claim=f"CrewAI answer: {answer[:200]}",
                         evidence_ids=[],
-                        confidence=confidence,
+                        confidence=min(1.0, confidence),
                     )
                 except RuntimeError:
                     pass
@@ -343,11 +344,12 @@ class QueryAgent:
             answer=rag_response.answer,
             why_it_matters=why_it_matters,
             supporting_evidence=[
-                asdict(e) for e in rag_response.evidence_details
+                asdict(e) | {"confidence": self._to_percent(e.confidence)}
+                for e in rag_response.evidence_details
             ],
             causal_chain=causal_chain,
             recommended_actions=recommended_actions,
-            confidence=rag_response.confidence,
+            confidence=self._to_percent(rag_response.confidence),
             time_horizon=time_horizon,
             uncertainty=rag_response.uncertainty,
             query_type=rag_response.query_decomposition.get("query_type") or rag_response.query_decomposition.get("type", "general"),
@@ -498,3 +500,13 @@ class QueryAgent:
             if e.type == "risk_signal":
                 return "10–15 minutes"
         return "Current state"
+
+    def _to_percent(self, confidence: float) -> float:
+        """Normalize confidence into 0-100 for UI-facing payloads."""
+        try:
+            c = float(confidence)
+        except Exception:
+            return 0.0
+        if c <= 1.0:
+            return round(c * 100.0, 2)
+        return round(max(0.0, min(100.0, c)), 2)

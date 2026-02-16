@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 
 from blackboard import SharedState, Anomaly, PolicyHit, SeverityScore
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 class SeverityEngineAgent:
@@ -33,7 +34,33 @@ class SeverityEngineAgent:
         "SUSTAINED_RESOURCE_WARNING": {"asset": 1.2, "blast": 1.15, "module": 1.15},
     }
 
+    def __init__(self):
+        self._use_langgraph = is_langgraph_enabled()
+
     def analyze(
+        self,
+        anomalies: List[Anomaly],
+        policy_hits: List[PolicyHit],
+        state: SharedState,
+    ) -> List[SeverityScore]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {
+                    "anomalies": anomalies,
+                    "policy_hits": policy_hits,
+                    "state": state,
+                    "scores": [],
+                    "repetition": Counter([a.type for a in anomalies]),
+                },
+                [
+                    ("score_anomalies", self._graph_score_anomalies),
+                    ("score_policy_hits", self._graph_score_policy_hits),
+                ],
+            )
+            return graph_state.get("scores", [])
+        return self._analyze_core(anomalies, policy_hits, state)
+
+    def _analyze_core(
         self,
         anomalies: List[Anomaly],
         policy_hits: List[PolicyHit],
@@ -80,6 +107,54 @@ class SeverityEngineAgent:
             scores.append(sev)
 
         return scores
+
+    def _graph_score_anomalies(self, graph_state: Dict[str, object]) -> Dict[str, object]:
+        anomalies = graph_state["anomalies"]
+        state = graph_state["state"]
+        repetition = graph_state["repetition"]
+        scores = graph_state["scores"]
+        for a in anomalies:  # type: ignore[assignment]
+            base = self._base_score_for_anomaly(a)
+            ctx = self._context_factors(issue_type=a.type, repetition_count=repetition[a.type], description=a.description)  # type: ignore[index]
+            final = self._final_score(base, ctx)
+            sev = state.add_severity_score(  # type: ignore[attr-defined]
+                source_type="anomaly",
+                source_id=a.anomaly_id,
+                issue_type=a.type,
+                base_score=base,
+                final_score=final,
+                label=self._label(final),
+                vector=self._vector(base, ctx),
+                escalation_state=self._escalation_state(final, repetition[a.type]),  # type: ignore[index]
+                context_factors=ctx,
+                evidence_ids=list(a.evidence),
+            )
+            scores.append(sev)  # type: ignore[attr-defined]
+        return graph_state
+
+    def _graph_score_policy_hits(self, graph_state: Dict[str, object]) -> Dict[str, object]:
+        policy_hits = graph_state["policy_hits"]
+        state = graph_state["state"]
+        scores = graph_state["scores"]
+        for p in policy_hits:  # type: ignore[assignment]
+            issue = f"POLICY_{p.policy_id}"
+            base = 7.0 if p.violation_type.upper() == "SILENT" else 5.5
+            ctx = self._context_factors(issue_type=issue, repetition_count=1, description=p.description)
+            final = self._final_score(base, ctx)
+            sev = state.add_severity_score(  # type: ignore[attr-defined]
+                source_type="policy_hit",
+                source_id=p.hit_id,
+                issue_type=issue,
+                base_score=base,
+                final_score=final,
+                label=self._label(final),
+                vector=self._vector(base, ctx),
+                escalation_state=self._escalation_state(final, 1),
+                context_factors=ctx,
+                evidence_ids=[p.event_id],
+            )
+            scores.append(sev)  # type: ignore[attr-defined]
+        return graph_state
 
     def _base_score_for_anomaly(self, a: Anomaly) -> float:
         t = a.type

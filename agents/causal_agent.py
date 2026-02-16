@@ -28,6 +28,7 @@ from blackboard import (
     SharedState, CausalLink,
     Anomaly, PolicyHit, RiskSignal
 )
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 # Known causal patterns (dependency reasoning)
@@ -91,6 +92,7 @@ class CausalAgent:
     def __init__(self):
         self._identified_links: List[str] = []  # Track for dedup
         self._graph = None
+        self._use_langgraph = is_langgraph_enabled()
     
     def _get_graph(self):
         """Lazy-init Neo4j client."""
@@ -100,6 +102,31 @@ class CausalAgent:
         return self._graph
     
     def analyze(
+        self,
+        anomalies: List[Anomaly],
+        policy_hits: List[PolicyHit],
+        risk_signals: List[RiskSignal],
+        state: SharedState
+    ) -> List[CausalLink]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {
+                    "anomalies": anomalies,
+                    "policy_hits": policy_hits,
+                    "risk_signals": risk_signals,
+                    "state": state,
+                    "candidates": [],
+                    "links": [],
+                },
+                [
+                    ("find_candidates", self._graph_find_candidates),
+                    ("evaluate_candidates", self._graph_evaluate_candidates),
+                ],
+            )
+            return graph_state.get("links", [])
+        return self._analyze_core(anomalies, policy_hits, risk_signals, state)
+
+    def _analyze_core(
         self,
         anomalies: List[Anomaly],
         policy_hits: List[PolicyHit],
@@ -123,6 +150,22 @@ class CausalAgent:
                 links.append(link)
         
         return links
+
+    def _graph_find_candidates(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["candidates"] = self._find_candidates(
+            graph_state["anomalies"], graph_state["policy_hits"], graph_state["risk_signals"]
+        )
+        return graph_state
+
+    def _graph_evaluate_candidates(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        links: List[CausalLink] = []
+        state = graph_state["state"]
+        for candidate in graph_state.get("candidates", []):
+            link = self._evaluate_candidate(candidate, state)
+            if link:
+                links.append(link)
+        graph_state["links"] = links
+        return graph_state
     
     def _find_candidates(
         self,

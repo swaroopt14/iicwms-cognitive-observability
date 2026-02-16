@@ -31,6 +31,7 @@ from pathlib import Path
 
 from simulator.engine import Event, ResourceMetric, EventType
 from observation import ObservationLayer, get_observation_layer
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 class ScenarioType(Enum):
@@ -206,6 +207,7 @@ class ScenarioInjectionAgent:
         self._observation = get_observation_layer()
         self._executions: List[ScenarioExecution] = []
         self._base_time = datetime.utcnow()
+        self._use_langgraph = is_langgraph_enabled()
 
     def list_scenarios(self) -> List[Dict[str, Any]]:
         """List all available scenarios with descriptions."""
@@ -228,6 +230,22 @@ class ScenarioInjectionAgent:
         Inject a scenario into the system.
 
         Returns an execution record for tracking.
+        """
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {"scenario_id": scenario_id, "execution": None},
+                [("inject", self._graph_inject)],
+            )
+            return graph_state["execution"]
+        return self._inject_scenario_core(scenario_id)
+
+    def _graph_inject(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["execution"] = self._inject_scenario_core(graph_state["scenario_id"])
+        return graph_state
+
+    def _inject_scenario_core(self, scenario_id: str) -> ScenarioExecution:
+        """
+        Core deterministic injector used by both graph and fallback path.
         """
         try:
             scenario_type = ScenarioType(scenario_id)

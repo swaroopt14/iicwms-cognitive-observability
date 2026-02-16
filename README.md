@@ -24,6 +24,37 @@ IT teams lose **$1.2M/year** to alert fatigue, silent compliance violations, and
 
 ---
 
+## Latest Implementation Updates (February 16, 2026)
+
+- **LangGraph orchestration expanded across agents**:
+  - Added shared runtime: `agents/langgraph_runtime.py`
+  - Enabled graph-path + deterministic fallback in:
+    - `WorkflowAgent`, `ResourceAgent`, `ComplianceAgent`, `AdaptiveBaselineAgent`
+    - `CodeAgent`, `RiskForecastAgent`, `CausalAgent`
+    - `SeverityEngineAgent`, `RecommendationEngineAgent`
+    - `WhatIfSimulatorAgent`, `ScenarioInjectionAgent`
+  - `MasterAgent` already supports LangGraph cycle orchestration with fallback.
+- **Query/Ask Chronos improvements**:
+  - Dynamic query synthesis and richer recommendation extraction in `QueryAgent` + `rag/query_engine.py`
+  - Orchestrator mode surfaced as `langgraph` or deterministic fallback.
+- **Insight readability upgrade**:
+  - Replaced long raw summary strings with structured sections in `explanation/engine.py`:
+    - `Anomalies: ...`
+    - `Policy Violations: ...`
+    - `Risk Escalation: ...`
+  - Added top-count compression (`+N more`) and malformed entity cleanup (e.g., removes `vm_` placeholders).
+- **Behavioral guarantees kept**:
+  - No direct agent-to-agent chat; Blackboard remains the coordination layer.
+  - Deterministic fallback remains active when LangGraph is disabled/unavailable.
+  - Evidence-linked reasoning preserved for auditability.
+
+**Runtime flags**
+- `ENABLE_LANGGRAPH=true`
+- `ENABLE_LANGGRAPH_AGENTS=true`
+- `ENABLE_VECTOR_STORE=false` (recommended for local deterministic runs)
+
+---
+
 ## Service Architecture
 
 ```

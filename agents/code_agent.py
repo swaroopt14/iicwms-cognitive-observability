@@ -24,12 +24,29 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from observation import ObservedEvent
 from blackboard import SharedState, Anomaly
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 class CodeAgent:
     AGENT_NAME = "CodeAgent"
 
+    def __init__(self):
+        self._use_langgraph = is_langgraph_enabled()
+
     def analyze(self, events: List[ObservedEvent], state: SharedState) -> List[Anomaly]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {"events": events, "state": state, "anomalies": []},
+                [("code_risk_detection", self._graph_code_risk_detection)],
+            )
+            return graph_state.get("anomalies", [])
+        return self._analyze_core(events, state)
+
+    def _graph_code_risk_detection(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["anomalies"] = self._analyze_core(graph_state["events"], graph_state["state"])
+        return graph_state
+
+    def _analyze_core(self, events: List[ObservedEvent], state: SharedState) -> List[Anomaly]:
         anomalies: List[Anomaly] = []
 
         gh_events = [e for e in events if self._is_github_event(e)]
