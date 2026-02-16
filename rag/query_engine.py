@@ -518,7 +518,10 @@ class ReasoningSynthesizer:
             return "System is initializing."
         
         latest = cycles[-1]
-        return f"System status: {latest.anomaly_count} anomalies, {latest.policy_hit_count} policy violations detected."
+        return (
+            f"System status: {len(latest.anomalies)} anomalies, "
+            f"{len(latest.policy_hits)} policy violations detected."
+        )
 class AgenticRAGEngine:
     """Enhanced RAG engine with vector database support."""
     

@@ -327,8 +327,7 @@ class QueryAgent:
     ) -> QueryResult:
         """Process query using the pattern-matching RAG engine (original logic)."""
         # 1. Use the existing RAG engine for core reasoning
-        #rag_response: RAGResponse = self._rag_engine.query(user_query)
-        rag_response= None
+        rag_response: RAGResponse = self._rag_engine.query(user_query)
         # 2. Enrich with "why it matters" and causal chain
         why_it_matters = self._derive_why_it_matters(rag_response)
         causal_chain = self._derive_causal_chain(rag_response)
@@ -351,7 +350,7 @@ class QueryAgent:
             confidence=rag_response.confidence,
             time_horizon=time_horizon,
             uncertainty=rag_response.uncertainty,
-            query_type=rag_response.query_decomposition.get("query_type", "general"),
+            query_type=rag_response.query_decomposition.get("query_type") or rag_response.query_decomposition.get("type", "general"),
             target_agents=rag_response.query_decomposition.get("target_agents", []),
             follow_up_queries=follow_ups,
             timestamp=datetime.utcnow().isoformat(),
