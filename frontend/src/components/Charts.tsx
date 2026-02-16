@@ -41,6 +41,10 @@ interface AreaChartProps {
   showGrid?: boolean;
   showDots?: boolean;
   showLabels?: boolean;
+  xLabels?: string[];
+  xAxisLabel?: string;
+  yAxisLabel?: string;
+  yFormatter?: (value: number) => string;
   animated?: boolean;
 }
 
@@ -53,6 +57,10 @@ export function AreaChart({
   showGrid = true,
   showDots = true,
   showLabels = false,
+  xLabels,
+  xAxisLabel = 'Time',
+  yAxisLabel = 'Value',
+  yFormatter,
   animated = true,
 }: AreaChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -127,22 +135,43 @@ export function AreaChart({
           ctx.font = '10px Inter, system-ui';
           ctx.textAlign = 'right';
           const value = maxVal - (range / 4) * i;
-          ctx.fillText(value.toFixed(0), padding.left - 5, y + 3);
+          const label = yFormatter ? yFormatter(value) : value.toFixed(0);
+          ctx.fillText(label, padding.left - 5, y + 3);
         }
       }
+    }
+
+    if (showLabels) {
+      // Axis lines
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(padding.left, padding.top);
+      ctx.lineTo(padding.left, chartHeight - padding.bottom);
+      ctx.lineTo(width - padding.right, chartHeight - padding.bottom);
+      ctx.stroke();
     }
 
     // Calculate points
     const visibleDataCount = Math.ceil(data.length * progress);
     const points: { x: number; y: number }[] = [];
     
+    const minY = padding.top;
+    const maxY = padding.top + plotHeight;
     for (let i = 0; i < visibleDataCount; i++) {
       const x = padding.left + (plotWidth / (data.length - 1)) * i;
-      const y = padding.top + plotHeight - ((data[i] - minVal) / range) * plotHeight;
+      const rawY = padding.top + plotHeight - ((data[i] - minVal) / range) * plotHeight;
+      const y = Math.max(minY, Math.min(maxY, rawY));
       points.push({ x, y });
     }
 
     if (points.length < 2) return;
+
+    // Clip plotting to chart area so curves never overflow below X-axis.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(padding.left, padding.top, plotWidth, plotHeight);
+    ctx.clip();
 
     // Draw gradient fill
     const gradient = ctx.createLinearGradient(0, padding.top, 0, chartHeight - padding.bottom);
@@ -165,6 +194,8 @@ export function AreaChart({
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.stroke();
+
+    ctx.restore();
 
     // Draw dots
     if (showDots && progress === 1) {
@@ -199,7 +230,46 @@ export function AreaChart({
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-  }, [data, color, gradientFrom, gradientTo, showGrid, showDots, showLabels, progress]);
+
+    if (showLabels) {
+      // X-axis labels
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px Inter, system-ui';
+      ctx.textAlign = 'center';
+      const labelInterval = Math.max(1, Math.ceil(data.length / 6));
+      for (let i = 0; i < data.length; i++) {
+        if (i % labelInterval !== 0 && i !== data.length - 1) continue;
+        const x = padding.left + (plotWidth / Math.max(data.length - 1, 1)) * i;
+        const label = xLabels?.[i] ?? `${i + 1}`;
+        ctx.fillText(label, x, chartHeight - 10);
+      }
+
+      // Axis titles
+      ctx.fillStyle = '#64748b';
+      ctx.font = '11px Inter, system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText(xAxisLabel, padding.left + plotWidth / 2, chartHeight - 2);
+
+      ctx.save();
+      ctx.translate(12, padding.top + plotHeight / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(yAxisLabel, 0, 0);
+      ctx.restore();
+    }
+  }, [
+    data,
+    color,
+    gradientFrom,
+    gradientTo,
+    showGrid,
+    showDots,
+    showLabels,
+    xLabels,
+    xAxisLabel,
+    yAxisLabel,
+    yFormatter,
+    progress,
+  ]);
 
   return (
     <canvas
@@ -218,6 +288,12 @@ interface BarChartProps {
   colors?: string[];
   height?: number;
   showGrid?: boolean;
+  showAxes?: boolean;
+  xLabels?: string[];
+  xAxisLabel?: string;
+  yAxisLabel?: string;
+  yTickCount?: number;
+  yFormatter?: (value: number) => string;
   barRadius?: number;
   animated?: boolean;
   highlightThreshold?: number;
@@ -229,6 +305,12 @@ export function BarChart({
   colors = ['#6366f1', '#818cf8'],
   height = 160,
   showGrid = true,
+  showAxes = true,
+  xLabels,
+  xAxisLabel = 'Categories',
+  yAxisLabel = 'Value',
+  yTickCount = 4,
+  yFormatter,
   barRadius = 6,
   animated = true,
   highlightThreshold,
@@ -273,7 +355,9 @@ export function BarChart({
 
     const width = rect.width;
     const chartHeight = rect.height;
-    const padding = { top: 10, right: 10, bottom: 10, left: 10 };
+    const padding = showAxes
+      ? { top: 10, right: 12, bottom: 38, left: 46 }
+      : { top: 10, right: 10, bottom: 10, left: 10 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = chartHeight - padding.top - padding.bottom;
 
@@ -281,8 +365,12 @@ export function BarChart({
 
     if (data.length === 0 || plotWidth <= 0 || plotHeight <= 0) return;
 
-    const maxVal = Math.max(...data) * 1.15 || 1;
-    const barWidth = Math.max(4, (plotWidth / data.length) - 8);
+    const maxRaw = Math.max(...data);
+    const maxVal = maxRaw > 0 ? maxRaw * 1.15 : 1;
+    const groups = Math.max(1, data.length);
+    const groupWidth = plotWidth / groups;
+    const barWidth = Math.max(6, Math.min(48, groupWidth * 0.64));
+    const tickCount = Math.max(2, yTickCount);
 
     // Draw grid
     if (showGrid) {
@@ -290,20 +378,56 @@ export function BarChart({
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       
-      for (let i = 0; i <= 4; i++) {
-        const y = padding.top + (plotHeight / 4) * i;
+      for (let i = 0; i <= tickCount; i++) {
+        const y = padding.top + (plotHeight / tickCount) * i;
         ctx.beginPath();
         ctx.moveTo(padding.left, y);
         ctx.lineTo(width - padding.right, y);
         ctx.stroke();
+
+        if (showAxes) {
+          const value = maxVal - (maxVal / tickCount) * i;
+          ctx.fillStyle = '#64748b';
+          ctx.font = '10px ui-sans-serif, system-ui, -apple-system, Segoe UI';
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'middle';
+          const label = yFormatter ? yFormatter(value) : value.toFixed(0);
+          ctx.fillText(label, padding.left - 8, y);
+        }
       }
       ctx.setLineDash([]);
+    }
+
+    if (showAxes) {
+      // Axis lines
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(padding.left, padding.top);
+      ctx.lineTo(padding.left, chartHeight - padding.bottom);
+      ctx.lineTo(width - padding.right, chartHeight - padding.bottom);
+      ctx.stroke();
+
+      // Axis labels
+      ctx.fillStyle = '#64748b';
+      ctx.font = '11px ui-sans-serif, system-ui, -apple-system, Segoe UI';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(xAxisLabel, padding.left + plotWidth / 2, chartHeight - 6);
+
+      ctx.save();
+      ctx.translate(14, padding.top + plotHeight / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(yAxisLabel, 0, 0);
+      ctx.restore();
     }
 
     // Draw bars
     data.forEach((value, i) => {
       const barHeight = (value / maxVal) * plotHeight * progress;
-      const x = padding.left + i * (barWidth + 8) + 4;
+      const x = padding.left + i * groupWidth + (groupWidth - barWidth) / 2;
       const y = chartHeight - padding.bottom - barHeight;
 
       // Create gradient for bar
@@ -332,8 +456,32 @@ export function BarChart({
       ctx.shadowColor = 'transparent';
       ctx.shadowBlur = 0;
       ctx.shadowOffsetY = 0;
+
+      // X labels
+      if (showAxes) {
+        const label = (xLabels && xLabels[i]) ? xLabels[i] : String(i + 1);
+        ctx.fillStyle = '#64748b';
+        ctx.font = '10px ui-sans-serif, system-ui, -apple-system, Segoe UI';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(label, x + barWidth / 2, chartHeight - padding.bottom + 6);
+      }
     });
-  }, [data, colors, showGrid, barRadius, progress, highlightThreshold, highlightColor]);
+  }, [
+    data,
+    colors,
+    showGrid,
+    showAxes,
+    xLabels,
+    xAxisLabel,
+    yAxisLabel,
+    yTickCount,
+    yFormatter,
+    barRadius,
+    progress,
+    highlightThreshold,
+    highlightColor,
+  ]);
 
   return (
     <canvas

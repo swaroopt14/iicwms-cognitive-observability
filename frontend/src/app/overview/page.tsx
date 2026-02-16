@@ -1,13 +1,12 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   TrendingUp,
   TrendingDown,
   AlertTriangle,
-  DollarSign,
   ChevronRight,
   ChevronDown,
   Clock,
@@ -25,10 +24,8 @@ import {
   fetchEvents,
   fetchRiskIndex,
   fetchAnomalyTrend,
-  fetchCostTrend,
   fetchOverviewStats,
   type Insight,
-  type Event,
 } from '@/lib/api';
 import { formatTime } from '@/lib/utils';
 import { AreaChart, BarChart, RiskGraph } from '@/components/Charts';
@@ -144,6 +141,13 @@ function EventTypeBadge({ type }: { type: string }) {
 }
 
 export default function OverviewPage() {
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 10000);
+    return () => clearInterval(id);
+  }, []);
+
   const { data: health } = useQuery({
     queryKey: ['systemHealth'],
     queryFn: fetchSystemHealth,
@@ -174,25 +178,37 @@ export default function OverviewPage() {
     refetchInterval: 10000,
   });
 
-  const { data: costTrend } = useQuery({
-    queryKey: ['costTrend'],
-    queryFn: fetchCostTrend,
-    refetchInterval: 15000,
-  });
-
   const { data: overviewStats } = useQuery({
     queryKey: ['overviewStats'],
     queryFn: fetchOverviewStats,
     refetchInterval: 5000,
   });
 
-  // Derive chart data from real backend data
-  const costData = costTrend?.length ? costTrend.map(p => p.cost) : Array.from({ length: 12 }, () => 30);
-  const anomalyData = anomalyTrend?.length ? anomalyTrend.map(p => p.total) : Array.from({ length: 12 }, () => 5);
-
   const displayInsights = insights?.length ? insights : [];
   const displayEvents = events?.length ? events : [];
   const displayRiskData = riskData?.history?.length ? riskData.history : [];
+  const riskFallbackFromAnomalyTrend = anomalyTrend?.length
+    ? anomalyTrend.map((p) => ({
+        timestamp: p.ts,
+        risk_score: Math.max(0, Math.min(100, 25 + p.total * 6)),
+        state: p.total >= 10 ? 'VIOLATION' : p.total >= 7 ? 'AT_RISK' : p.total >= 4 ? 'DEGRADED' : 'NORMAL',
+      }))
+    : [];
+  const systemHealthTrendData = displayRiskData.length ? displayRiskData : riskFallbackFromAnomalyTrend;
+  // Use rolling real-time timestamps for chart X-axis so labels move every refresh.
+  const systemHealthTrendRealtime = useMemo(() => {
+    const base = systemHealthTrendData;
+    if (!base.length) return base;
+    const now = nowMs;
+    const stepMs = 10_000; // matches refetch interval (10s)
+    return base.map((point, idx) => ({
+      ...point,
+      timestamp: new Date(now - (base.length - 1 - idx) * stepMs).toISOString(),
+    }));
+  }, [systemHealthTrendData, nowMs]);
+  const systemHealthArea = systemHealthTrendData.length
+    ? systemHealthTrendData.map((d) => d.risk_score)
+    : [22, 24, 28, 31, 35, 33, 30, 27, 25, 23, 21, 20];
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -214,6 +230,23 @@ export default function OverviewPage() {
           <div>
             <div className="text-sm font-semibold text-emerald-700">{health?.status || 'System Normal'}</div>
             <div className="text-xs text-emerald-600">All agents operational</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Value Proposition */}
+      <div className="p-5 bg-gradient-to-r from-indigo-50 via-violet-50 to-purple-50 rounded-2xl border border-indigo-100">
+        <div className="flex items-start gap-4">
+          <div className="icon-container icon-container-md bg-gradient-to-br from-indigo-500 to-violet-500 shadow-lg flex-shrink-0">
+            <Info className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <div className="font-semibold text-indigo-900 mb-1">This is Cognitive Observability</div>
+            <p className="text-sm text-indigo-700 leading-relaxed">
+              Unlike traditional dashboards, this page shows <strong>reasoning insights</strong> — not just metrics.
+              Each insight is backed by evidence, produced by specialized AI agents, and includes actionable
+              recommendations with confidence scores. We don&apos;t just tell you what happened — we explain <strong>why</strong>.
+            </p>
           </div>
         </div>
       </div>
@@ -340,37 +373,45 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        {/* Cost Overview */}
+        {/* System Health Trend */}
         <div className="col-span-7">
           <div className="chart-container h-[400px]">
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h3 className="chart-title">
-                  <DollarSign className="w-4 h-4 text-emerald-500" />
-                  Cost Overview
+                  <TrendingUp className="w-4 h-4 text-violet-600" />
+                  System Health Trend
                 </h3>
-                <p className="chart-subtitle">Simulated operational costs over time</p>
+                <p className="chart-subtitle">Live risk trajectory over time (auto-refresh every 10s)</p>
               </div>
               <div className="text-right">
                 <div className="text-3xl font-bold text-[var(--color-text-primary)]">
-                  ${costTrend?.length ? costTrend.reduce((s, p) => s + p.cost, 0).toFixed(0) : '—'}
+                  {typeof riskData?.current_risk === 'number' ? riskData.current_risk.toFixed(1) : '—'}
                 </div>
-                <div className="flex items-center gap-1 text-sm text-emerald-600 font-medium">
+                <div className="flex items-center gap-1 text-sm text-violet-600 font-medium">
                   <TrendingUp className="w-4 h-4" />
-                  {costTrend?.length ?? 0} data points
+                  {systemHealthTrendRealtime.length} data points
                 </div>
               </div>
             </div>
-            <AreaChart
-              data={costData}
-              color="#10b981"
-              gradientFrom="rgba(16, 185, 129, 0.3)"
-              gradientTo="rgba(16, 185, 129, 0)"
-              height={280}
-              showGrid={true}
-              showDots={false}
-              animated={true}
-            />
+            {systemHealthTrendRealtime.length > 0 ? (
+              <RiskGraph
+                data={systemHealthTrendRealtime}
+                height={280}
+                showZones={true}
+              />
+            ) : (
+              <AreaChart
+                data={systemHealthArea}
+                color="#8b5cf6"
+                gradientFrom="rgba(139, 92, 246, 0.25)"
+                gradientTo="rgba(139, 92, 246, 0)"
+                height={280}
+                showGrid={true}
+                showDots={false}
+                animated={true}
+              />
+            )}
           </div>
         </div>
 
@@ -400,74 +441,6 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        {/* Anomaly Detection Rate */}
-        <div className="col-span-6">
-          <div className="chart-container h-[320px]">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="icon-container icon-container-sm bg-indigo-100">
-                <BarChart3 className="w-4 h-4 text-indigo-600" />
-              </div>
-              <div>
-                <h3 className="chart-title">Anomaly Detection Rate</h3>
-                <p className="chart-subtitle">% of anomalous events per time bucket</p>
-              </div>
-            </div>
-            <BarChart
-              data={anomalyData}
-              colors={['#6366f1', '#818cf8']}
-              height={220}
-              showGrid={true}
-              barRadius={6}
-              animated={true}
-              highlightThreshold={15}
-              highlightColor="#f59e0b"
-            />
-          </div>
-        </div>
-
-        {/* System Health Trend */}
-        <div className="col-span-6">
-          <div className="chart-container h-[320px]">
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-3">
-                <div className="icon-container icon-container-sm bg-violet-100">
-                  <TrendingUp className="w-4 h-4 text-violet-600" />
-                </div>
-                <div>
-                  <h3 className="chart-title">System Health Trend</h3>
-                  <p className="chart-subtitle">Risk index trajectory</p>
-                </div>
-              </div>
-              <div className="badge badge-warning">
-                Score: {typeof riskData?.current_risk === 'number' ? riskData.current_risk.toFixed(1) : '—'}
-              </div>
-            </div>
-            <RiskGraph
-              data={displayRiskData}
-              height={220}
-              showZones={true}
-            />
-          </div>
-        </div>
-
-        {/* Value Proposition */}
-        <div className="col-span-12">
-          <div className="p-5 bg-gradient-to-r from-indigo-50 via-violet-50 to-purple-50 rounded-2xl border border-indigo-100">
-            <div className="flex items-start gap-4">
-              <div className="icon-container icon-container-md bg-gradient-to-br from-indigo-500 to-violet-500 shadow-lg flex-shrink-0">
-                <Info className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <div className="font-semibold text-indigo-900 mb-1">This is Cognitive Observability</div>
-                <p className="text-sm text-indigo-700 leading-relaxed">
-                  Unlike traditional dashboards, this page shows <strong>reasoning insights</strong> — not just metrics. 
-                  Each insight is backed by evidence, produced by specialized AI agents, and includes actionable 
-                  recommendations with confidence scores. We don&apos;t just tell you what happened — we explain <strong>why</strong>.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );

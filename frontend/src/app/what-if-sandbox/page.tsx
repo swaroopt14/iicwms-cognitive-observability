@@ -240,7 +240,15 @@ export default function WhatIfSandboxPage() {
         <div className="grid grid-cols-3 gap-4">
           <div className="card p-4">
             <div className="text-xs font-semibold text-[var(--color-text-muted)] uppercase mb-2">Predicted Outcome</div>
-            <BarChart data={chartData} colors={['#4f46e5', '#818cf8']} height={140} />
+            <BarChart
+              data={chartData}
+              colors={['#4f46e5', '#818cf8']}
+              height={170}
+              xLabels={['Baseline Risk', 'Simulated Risk', 'Impact']}
+              xAxisLabel="Outcome Dimension"
+              yAxisLabel="Score"
+              yFormatter={(v) => `${Math.round(v)}`}
+            />
             <div className="text-[11px] text-[var(--color-text-muted)] mt-2">Bars: baseline risk, simulated risk, impact score.</div>
           </div>
 

@@ -129,6 +129,10 @@ class QueryAgent:
         If a SharedState is provided and a cycle is active,
         the answer is also recorded as a Hypothesis.
         """
+        greeting_result = self._maybe_greeting_query(user_query)
+        if greeting_result:
+            return greeting_result
+
         # Try CrewAI first if available
         checklist_result = self._maybe_ops_checklist_query(user_query, state)
         if checklist_result:
@@ -142,6 +146,50 @@ class QueryAgent:
 
         # Fallback: use the existing RAG engine
         return self._query_via_rag(user_query, state)
+
+    def _maybe_greeting_query(self, user_query: str) -> Optional[QueryResult]:
+        """Handle short greetings without forcing full system summary output."""
+        q = (user_query or "").strip().lower()
+        if not q:
+            return None
+
+        compact = re.sub(r"[^\w\s]", "", q).strip()
+        greeting_patterns = [
+            r"^(hi|hello|hey|yo|hola|namaste)$",
+            r"^(good morning|good afternoon|good evening)$",
+            r"^(how are you)$",
+            r"^(sup|whats up|what is up)$",
+            r"^(hi|hello|hey)\s+\w+$",
+        ]
+        if not any(re.match(p, compact) for p in greeting_patterns):
+            return None
+
+        query_id = f"qry_{uuid.uuid4().hex[:8]}"
+        return QueryResult(
+            query_id=query_id,
+            original_query=user_query,
+            answer=(
+                "Hi. I can help with risk, workflows, compliance, anomalies, and remediation checklists.\n"
+                "Try: \"show current risk\", \"what caused this\", or \"what should DevOps do next 15 minutes?\""
+            ),
+            why_it_matters=[
+                "Fast intent routing avoids noisy summaries for greeting-only inputs.",
+            ],
+            supporting_evidence=[],
+            causal_chain=[],
+            recommended_actions=[],
+            confidence=100.0,
+            time_horizon="Current state",
+            uncertainty="None",
+            query_type="greeting",
+            target_agents=["QueryAgent"],
+            follow_up_queries=[
+                "Show current risk status",
+                "What caused the latest spike?",
+                "Give me a DevOps checklist for next 15 minutes",
+            ],
+            timestamp=datetime.utcnow().isoformat(),
+        )
 
     def _maybe_ops_checklist_query(
         self,
@@ -329,6 +377,15 @@ class QueryAgent:
         """Process query using the pattern-matching RAG engine (original logic)."""
         # 1. Use the existing RAG engine for core reasoning
         rag_response: RAGResponse = self._rag_engine.query(user_query)
+        deduped_evidence = self._dedupe_evidence(rag_response.evidence_details)
+        rag_response = RAGResponse(
+            answer=rag_response.answer,
+            supporting_evidence=[e.id for e in deduped_evidence],
+            evidence_details=deduped_evidence,
+            confidence=rag_response.confidence,
+            uncertainty=rag_response.uncertainty,
+            query_decomposition=rag_response.query_decomposition,
+        )
         # 2. Enrich with "why it matters" and causal chain
         why_it_matters = self._derive_why_it_matters(rag_response)
         causal_chain = self._derive_causal_chain(rag_response)
@@ -510,3 +567,20 @@ class QueryAgent:
         if c <= 1.0:
             return round(c * 100.0, 2)
         return round(max(0.0, min(100.0, c)), 2)
+
+    def _dedupe_evidence(self, evidence: List[Any]) -> List[Any]:
+        """
+        Remove near-duplicate evidence entries by summary+type while preserving order.
+        Keeps the payload compact and avoids repeated top-evidence strings.
+        """
+        seen = set()
+        unique = []
+        for e in evidence:
+            summary = str(getattr(e, "summary", "")).strip().lower()
+            etype = str(getattr(e, "type", "")).strip().lower()
+            key = (etype, summary)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(e)
+        return unique[:12]

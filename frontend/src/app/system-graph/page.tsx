@@ -29,6 +29,11 @@ const riskStateColors: Record<string, { color: string; bg: string; border: strin
   INCIDENT: { color: '#dc2626', bg: 'bg-red-100', border: 'border-red-300' },
 };
 
+function getRiskStateStyle(riskState?: string) {
+  const normalized = String(riskState || 'NORMAL').trim().toUpperCase();
+  return riskStateColors[normalized] || riskStateColors.NORMAL;
+}
+
 // Tooltip Component
 function Tooltip({
   point,
@@ -41,7 +46,7 @@ function Tooltip({
 }) {
   if (!point) return null;
 
-  const stateConfig = riskStateColors[point.risk_state] || riskStateColors.NORMAL;
+  const stateConfig = getRiskStateStyle(point.risk_state);
 
   return (
     <div

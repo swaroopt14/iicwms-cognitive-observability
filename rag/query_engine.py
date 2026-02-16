@@ -526,7 +526,16 @@ class ReasoningSynthesizer:
         if not cycles:
             return "System is initializing. No completed reasoning cycles yet."
         latest = cycles[-1]
-        top = evidence[:3]
+        top: List[Evidence] = []
+        seen = set()
+        for e in evidence:
+            key = (e.type, e.summary.strip().lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            top.append(e)
+            if len(top) >= 3:
+                break
         top_txt = " | ".join(e.summary for e in top) if top else "No high-signal evidence ranked yet."
         return (
             f"Latest cycle summary: {len(latest.anomalies)} anomalies, {len(latest.policy_hits)} policy hits, "
