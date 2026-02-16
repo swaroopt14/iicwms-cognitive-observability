@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   Search,
@@ -31,10 +31,14 @@ import {
   queryChronosAI,
   runWhatIfSimulation,
   fetchIndustryIncidentBrief,
+  fetchRunbookActions,
+  createIncidentTask,
+  triggerAnalysisCycle,
   type SearchCausalStep as CausalStep,
   type SearchRAGResponse as RAGResponse,
   type WhatIfRunResponse,
   type IndustryIncidentBrief,
+  type RunbookAction,
 } from '@/lib/api';
 
 // ============================================
@@ -98,12 +102,12 @@ function getMockResponse(query: string): RAGResponse {
 
   if (q.includes('compliance') || q.includes('policy') || q.includes('violation') || q.includes('audit')) {
     return {
-      answer: 'The system is approaching a compliance violation state. Policy NO_AFTER_HOURS_WRITE has been triggered 3 times this week, with the latest occurrence at 2:15 AM. A silent violation pattern is forming around SLA-pressured manual overrides.',
+      answer: 'The platform is trending toward a compliance violation. Primary driver: sustained network latency on vm_3 (420ms, ~3x baseline) is delaying onboarding DEPLOY steps, increasing SLA pressure, and triggering manual override behavior that can bypass policy controls.',
       why_it_matters: [
-        'Third after-hours write incident this week — pattern, not anomaly',
-        'Manual overrides under SLA pressure bypass approval policies',
-        'Audit review in 2 weeks may flag systematic non-compliance',
-        'Combined policy risk score is 72, up from 45 last week',
+        'This is a repeat pattern, not a one-off incident',
+        'SLA pressure increases probability of risky human shortcuts',
+        'Delayed onboarding workflows can expand blast radius across teams',
+        'Compliance exposure is now coupled with reliability degradation',
       ],
       supporting_evidence: [
         { id: 'POLICY_HIT_01', type: 'policy', summary: 'NO_AFTER_HOURS_WRITE violated at 2:15 AM — repo_A write', confidence: 98, agent: 'ComplianceAgent' },
@@ -119,9 +123,10 @@ function getMockResponse(query: string): RAGResponse {
         { label: 'Audit Exposure', type: 'outcome' },
       ],
       recommended_actions: [
-        { action: 'Enable time-based access controls', expected_impact: 'Prevent future after-hours writes', priority: 'high' },
-        { action: 'Review approval bypass patterns', expected_impact: 'Close SLA override loophole', priority: 'high' },
-        { action: 'Pre-audit compliance posture report', expected_impact: 'Reduce audit risk', priority: 'medium' },
+        { action: 'Step 1 (0-5m): freeze non-critical deploys and cap retries', expected_impact: 'Immediate containment of workflow pressure', priority: 'high' },
+        { action: 'Step 2 (5-10m): enforce approval gate + role restrictions on overrides', expected_impact: 'Prevents policy bypass during mitigation', priority: 'high' },
+        { action: 'Step 3 (10-15m): verify policy hit trend is flat/down and document evidence', expected_impact: 'Audit-safe recovery confirmation', priority: 'high' },
+        { action: 'Run post-incident control review for NO_AFTER_HOURS_WRITE', expected_impact: 'Reduces recurrence risk', priority: 'medium' },
       ],
       confidence: 82,
       time_horizon: '2–14 days',
@@ -168,7 +173,7 @@ function getMockResponse(query: string): RAGResponse {
 
   // Default: system risk
   return {
-    answer: 'The system is trending toward a compliance violation due to sustained network latency impacting onboarding workflows. The primary cause is network pressure on vm_3 (420ms, 3x baseline), which cascades into DEPLOY step delays, SLA risk, and human override behavior that introduces compliance exposure.',
+    answer: 'The system is trending toward a compliance violation due to sustained network latency impacting onboarding workflows. Root signal: network pressure on vm_3 (420ms, ~3x baseline), which is cascading into DEPLOY delays, SLA stress, and manual override behavior that increases policy-breach risk. Recommended 15-minute response: contain, stabilize, then verify with evidence.',
     why_it_matters: [
       'SLA breach risk within 10–15 minutes if latency persists',
       'Manual override likely — historical pattern shows human workaround under pressure',
@@ -190,10 +195,10 @@ function getMockResponse(query: string): RAGResponse {
       { label: 'Compliance Violation', type: 'outcome' },
     ],
     recommended_actions: [
-      { action: 'Throttle non-critical background jobs', expected_impact: 'Reduce network & CPU contention', priority: 'high' },
-      { action: 'Notify on-call admin of SLA trajectory', expected_impact: 'Prevent unplanned override', priority: 'high' },
-      { action: 'Temporarily extend SLA threshold', expected_impact: 'Avoid automatic policy breach', priority: 'medium' },
-      { action: 'Investigate vm_3 network configuration', expected_impact: 'Root cause resolution', priority: 'medium' },
+      { action: 'Step 1 (0-5m): throttle non-critical deploy/background jobs and cap retries', expected_impact: 'Immediate containment of error amplification', priority: 'high' },
+      { action: 'Step 2 (5-10m): prioritize critical onboarding/payment workflows and tune timeout/backoff', expected_impact: 'Lower SLA breach probability', priority: 'high' },
+      { action: 'Step 3 (10-15m): run compliance guard check and confirm risk trend down', expected_impact: 'Prevents silent policy breach during mitigation', priority: 'high' },
+      { action: 'Root-cause follow-up: investigate vm_3 network path/config', expected_impact: 'Durable recovery and recurrence prevention', priority: 'medium' },
     ],
     confidence: 74,
     time_horizon: '10–15 minutes',
@@ -300,6 +305,9 @@ function CollapsibleSection({ title, icon: Icon, iconColor, defaultOpen = false,
 function AssistantMessage({ message, onFollowUp }: { message: ChatMessage; onFollowUp: (q: string) => void }) {
   const [copied, setCopied] = useState(false);
   const r = message.response!;
+  const compactWhy = (r.why_it_matters || []).slice(0, 3);
+  const compactEvidence = (r.supporting_evidence || []).slice(0, 4);
+  const compactActions = (r.recommended_actions || []).slice(0, 8);
   const confidenceColor = r.confidence > 70 ? '#10b981' : r.confidence > 40 ? '#f59e0b' : '#ef4444';
 
   const handleCopy = () => {
@@ -350,21 +358,22 @@ function AssistantMessage({ message, onFollowUp }: { message: ChatMessage; onFol
         </div>
 
         {/* Why it matters */}
-        <CollapsibleSection title="Why This Matters" icon={AlertTriangle} iconColor="#f59e0b" defaultOpen={true}>
+        <CollapsibleSection title="Why This Matters" icon={AlertTriangle} iconColor="#f59e0b" defaultOpen={false}>
           <ul className="space-y-2 mt-3">
-            {r.why_it_matters.map((point, i) => (
+            {compactWhy.map((point, i) => (
               <li key={i} className="flex items-start gap-2.5">
                 <span className="w-5 h-5 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0 mt-0.5 text-[10px] font-bold text-amber-700">{i + 1}</span>
                 <span className="text-sm text-[var(--color-text-secondary)] leading-relaxed">{point}</span>
               </li>
             ))}
           </ul>
+          <div className="text-[10px] text-[var(--color-text-muted)] mt-2">Showing top {compactWhy.length} points</div>
         </CollapsibleSection>
 
         {/* Evidence */}
-        <CollapsibleSection title="Supporting Evidence" icon={Zap} iconColor="#6366f1" count={r.supporting_evidence.length} defaultOpen={true}>
+        <CollapsibleSection title="Supporting Evidence" icon={Zap} iconColor="#6366f1" count={r.supporting_evidence.length} defaultOpen={false}>
           <div className="space-y-2 mt-3">
-            {r.supporting_evidence.map((e) => {
+            {compactEvidence.map((e) => {
               const cfg = evidenceTypeConfig[e.type] || { color: '#64748b', label: e.type };
               return (
                 <div key={e.id} className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer group/ev">
@@ -384,6 +393,10 @@ function AssistantMessage({ message, onFollowUp }: { message: ChatMessage; onFol
                 </div>
               );
             })}
+          </div>
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-[10px] text-[var(--color-text-muted)]">Showing top {compactEvidence.length} evidence items</span>
+            <a href="/audit" className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700">View Full Evidence in Audit</a>
           </div>
         </CollapsibleSection>
 
@@ -410,16 +423,20 @@ function AssistantMessage({ message, onFollowUp }: { message: ChatMessage; onFol
         </CollapsibleSection>
 
         {/* Recommended actions */}
-        <CollapsibleSection title="Recommended Actions" icon={CheckCircle} iconColor="#10b981" count={r.recommended_actions.length} defaultOpen={true}>
+        <CollapsibleSection title="Recommended Actions" icon={CheckCircle} iconColor="#10b981" count={r.recommended_actions.length} defaultOpen={false}>
           <div className="space-y-2 mt-3">
-            {r.recommended_actions.length > 0 ? (
-              r.recommended_actions.map((a, i) => (
-                <div key={i} className="flex items-center gap-3 p-2.5 rounded-lg bg-slate-50">
+            {compactActions.length > 0 ? (
+              compactActions.map((a, i) => (
+                <div key={i} className="flex items-start gap-3 p-2.5 rounded-lg bg-slate-50">
                   <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-md ${a.priority === 'high' ? 'bg-red-100 text-red-700' : a.priority === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
                     {a.priority}
                   </span>
-                  <span className="text-sm font-medium text-[var(--color-text-primary)] flex-1">{a.action}</span>
-                  <span className="text-xs text-[var(--color-text-muted)]">{a.expected_impact}</span>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-[var(--color-text-primary)]">{i + 1}. {a.action}</div>
+                    {a.expected_impact && (
+                      <div className="text-xs text-[var(--color-text-muted)] mt-0.5">{a.expected_impact}</div>
+                    )}
+                  </div>
                 </div>
               ))
             ) : (
@@ -428,6 +445,7 @@ function AssistantMessage({ message, onFollowUp }: { message: ChatMessage; onFol
               </p>
             )}
           </div>
+          <div className="text-[10px] text-[var(--color-text-muted)] mt-2">Showing top {compactActions.length} actions (stepwise)</div>
           <p className="text-[10px] text-[var(--color-text-muted)] mt-2 italic">Actions are suggestive — the system does not auto-remediate.</p>
         </CollapsibleSection>
 
@@ -605,12 +623,17 @@ function WhatIfTerminal({
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<SimulationResult[]>([]);
   const [incidentBrief, setIncidentBrief] = useState<IndustryIncidentBrief | null>(null);
+  const [runbookActions, setRunbookActions] = useState<RunbookAction[]>([]);
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
+  const [taskBusy, setTaskBusy] = useState<null | 'jira' | 'servicenow'>(null);
 
   if (!visible) return null;
 
   const runSimulation = async () => {
     setRunning(true);
     try {
+      // Ensure latest recommendations are produced for runbook/task buttons.
+      await triggerAnalysisCycle();
       const [lat, load, comp] = await Promise.all([
         runWhatIfSimulation('LATENCY_SPIKE', { magnitude: latencyMagnitude, duration_minutes: 15 }),
         runWhatIfSimulation('WORKLOAD_SURGE', { multiplier: workloadMultiplier, duration_minutes: 15 }),
@@ -623,8 +646,39 @@ function WhatIfTerminal({
       ]);
       const brief = await fetchIndustryIncidentBrief();
       setIncidentBrief(brief);
+      const actionsResp = await fetchRunbookActions(brief.cycle_id || undefined);
+      setRunbookActions(actionsResp.actions || []);
     } finally {
       setRunning(false);
+    }
+  };
+
+  const createTask = async (provider: 'jira' | 'servicenow') => {
+    if (!incidentBrief) return;
+    const top = runbookActions[0];
+    setTaskBusy(provider);
+    setTaskStatus(null);
+    try {
+      const task = await createIncidentTask({
+        provider,
+        title: `[${incidentBrief.risk_state}] ${top?.title || incidentBrief.top_recommendation.action}`,
+        description: [
+          `Risk score: ${Math.round(incidentBrief.risk_score)}`,
+          `Change: ${incidentBrief.top_change.change_type} PR #${incidentBrief.top_change.pr_number || 'n/a'}`,
+          `Business impact INR: ${Math.round(incidentBrief.business_impact.estimated_revenue_impact_inr)}`,
+          `Action: ${top?.title || incidentBrief.top_recommendation.action}`,
+        ].join('\n'),
+        priority: (top?.priority as 'P1' | 'P2' | 'P3' | 'P4') || 'P2',
+        action_code: top?.action_code || incidentBrief.top_recommendation.source,
+        cycle_id: incidentBrief.cycle_id || undefined,
+        metadata: {
+          repository: incidentBrief.top_change.repository,
+          deployment_id: incidentBrief.top_change.deployment_id,
+        },
+      });
+      setTaskStatus(`${provider.toUpperCase()} task created: ${task.task_id}`);
+    } finally {
+      setTaskBusy(null);
     }
   };
 
@@ -717,6 +771,35 @@ function WhatIfTerminal({
               </div>
             </div>
           </div>
+          <div className="mt-3 p-2 rounded-lg bg-slate-50 border border-[var(--color-border)]">
+            <div className="text-[11px] font-semibold text-[var(--color-text-secondary)] mb-2">Runbook Actions</div>
+            <div className="space-y-1">
+              {(runbookActions.length > 0 ? runbookActions.slice(0, 10) : [{
+                action_code: String(incidentBrief.top_recommendation.source || 'TOP_ACTION'),
+                title: String(incidentBrief.top_recommendation.action || 'Follow top recommendation'),
+                priority: String(incidentBrief.top_recommendation.urgency || 'P2'),
+                owner_team: 'platform',
+                rationale: String(incidentBrief.top_recommendation.action || 'Use top recommendation from latest cycle.'),
+                evidence_ids: [],
+                automation_possible: false,
+              } as unknown as RunbookAction]).map((a) => (
+                <div key={`${a.action_code}_${a.title}`} className="text-[11px] text-[var(--color-text-primary)] border border-[var(--color-border)] rounded-md bg-white p-2">
+                  <div className="font-semibold">{a.action_code} · {a.priority} · {a.owner_team}</div>
+                  <div className="text-[var(--color-text-secondary)] mt-0.5">{a.title}</div>
+                  <div className="text-[var(--color-text-muted)] mt-0.5">{a.rationale}</div>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2 mt-2">
+              <button className="btn btn-secondary text-xs" disabled={taskBusy !== null} onClick={() => createTask('jira')}>
+                {taskBusy === 'jira' ? 'Creating Jira...' : 'Create Jira Task'}
+              </button>
+              <button className="btn btn-secondary text-xs" disabled={taskBusy !== null} onClick={() => createTask('servicenow')}>
+                {taskBusy === 'servicenow' ? 'Creating SNOW...' : 'Create ServiceNow Task'}
+              </button>
+            </div>
+            {taskStatus && <div className="text-[11px] text-emerald-700 mt-2">{taskStatus}</div>}
+          </div>
         </div>
       )}
     </div>
@@ -727,6 +810,14 @@ function WhatIfTerminal({
 // Main Page
 // ============================================
 export default function SearchPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <SearchPageContent />
+    </Suspense>
+  );
+}
+
+function SearchPageContent() {
   const params = useSearchParams();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -735,8 +826,10 @@ export default function SearchPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const thinkingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const autoQuerySentRef = useRef(false);
   const scenarioFromRoute = params.get('scenario');
   const showPaytmTerminal = scenarioFromRoute === 'PAYTM_HOTFIX_FAIL';
+  const prefilledQuery = params.get('q');
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -748,8 +841,17 @@ export default function SearchPage() {
 
   // Clean up timer on unmount
   useEffect(() => {
-    return () => { if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current); };
+    return () => { 
+      if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current); 
+    };
   }, []);
+
+  useEffect(() => {
+    if (!prefilledQuery || autoQuerySentRef.current || isLoading) return;
+    autoQuerySentRef.current = true;
+    void handleSend(prefilledQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefilledQuery, isLoading]);
 
   const handleSend = async (text?: string) => {
     const q = text || input;

@@ -28,6 +28,7 @@ from blackboard import (
     SharedState, CausalLink,
     Anomaly, PolicyHit, RiskSignal
 )
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 # Known causal patterns (dependency reasoning)
@@ -91,6 +92,7 @@ class CausalAgent:
     def __init__(self):
         self._identified_links: List[str] = []  # Track for dedup
         self._graph = None
+        self._use_langgraph = is_langgraph_enabled()
     
     def _get_graph(self):
         """Lazy-init Neo4j client."""
@@ -100,6 +102,31 @@ class CausalAgent:
         return self._graph
     
     def analyze(
+        self,
+        anomalies: List[Anomaly],
+        policy_hits: List[PolicyHit],
+        risk_signals: List[RiskSignal],
+        state: SharedState
+    ) -> List[CausalLink]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {
+                    "anomalies": anomalies,
+                    "policy_hits": policy_hits,
+                    "risk_signals": risk_signals,
+                    "state": state,
+                    "candidates": [],
+                    "links": [],
+                },
+                [
+                    ("find_candidates", self._graph_find_candidates),
+                    ("evaluate_candidates", self._graph_evaluate_candidates),
+                ],
+            )
+            return graph_state.get("links", [])
+        return self._analyze_core(anomalies, policy_hits, risk_signals, state)
+
+    def _analyze_core(
         self,
         anomalies: List[Anomaly],
         policy_hits: List[PolicyHit],
@@ -123,6 +150,22 @@ class CausalAgent:
                 links.append(link)
         
         return links
+
+    def _graph_find_candidates(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["candidates"] = self._find_candidates(
+            graph_state["anomalies"], graph_state["policy_hits"], graph_state["risk_signals"]
+        )
+        return graph_state
+
+    def _graph_evaluate_candidates(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        links: List[CausalLink] = []
+        state = graph_state["state"]
+        for candidate in graph_state.get("candidates", []):
+            link = self._evaluate_candidate(candidate, state)
+            if link:
+                links.append(link)
+        graph_state["links"] = links
+        return graph_state
     
     def _find_candidates(
         self,
@@ -215,6 +258,13 @@ class CausalAgent:
         time_factor = 1.0 - (candidate.temporal_distance.total_seconds() / 60)  # Closer = higher
         adjusted_confidence = base_confidence * max(0.5, time_factor)
         
+        reasoning = self._build_friendly_reasoning(
+            cause_type=candidate.cause_type,
+            effect_type=candidate.effect_type,
+            temporal_distance=candidate.temporal_distance,
+            base_reason=pattern["reasoning"],
+        )
+
         # Create causal link in blackboard
         link = state.add_causal_link(
             cause=candidate.cause_type,
@@ -222,7 +272,7 @@ class CausalAgent:
             cause_entity=candidate.cause_entity,
             effect_entity=candidate.effect_entity,
             confidence=adjusted_confidence,
-            reasoning=pattern["reasoning"],
+            reasoning=reasoning,
             evidence_ids=candidate.evidence_ids
         )
         
@@ -235,7 +285,7 @@ class CausalAgent:
                     cause_entity=candidate.cause_entity,
                     effect_entity=candidate.effect_entity,
                     confidence=adjusted_confidence,
-                    reasoning=pattern["reasoning"],
+                    reasoning=reasoning,
                 )
             except Exception:
                 pass
@@ -252,3 +302,23 @@ class CausalAgent:
         # Would query state for all links involving entity
         # For now, return empty (would implement with graph queries)
         return []
+
+    def _build_friendly_reasoning(
+        self,
+        cause_type: str,
+        effect_type: str,
+        temporal_distance: timedelta,
+        base_reason: str,
+    ) -> str:
+        """
+        Plain-English explanation for UI and audits.
+        Avoids overly statistical language for operators.
+        """
+        secs = int(max(1, temporal_distance.total_seconds()))
+        cause = cause_type.replace("_", " ").title()
+        effect = effect_type.replace("_", " ").title()
+        return (
+            f"Observed sequence: {cause} happened before {effect} "
+            f"(~{secs}s gap). Likely link: {base_reason}. "
+            "Use linked evidence IDs to validate and act."
+        )

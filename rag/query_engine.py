@@ -1,41 +1,70 @@
 """
 IICWMS Agentic RAG Query Engine
 ===============================
-Reasoning Query Interface - NOT a chatbot.
+Dynamic, evidence-backed query engine for Chronos.
 
-This is the CORE DIFFERENTIATOR:
-"We don't replace monitoring tools.
- We reason over their outputs and convert operational noise
- into auditable, explainable, predictive decisions."
-
-WHAT IS INDEXED (VERY IMPORTANT):
-- Agent outputs (NOT raw logs only)
-- Blackboard state
-- Causal explanations
-- Policy definitions
-- Risk forecasts
-
-This is why the system is smarter than Datadog.
+Goals:
+- Answer broad workflow/system/compliance/risk questions from current state
+- Avoid static canned responses
+- Keep outputs auditable (all claims trace to evidence IDs)
+- Optionally run through LangGraph orchestration when available
 """
 
-import re
-from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass, asdict
-from enum import Enum
-import os
+from __future__ import annotations
 
-from blackboard import (
-    SharedState, ReasoningCycle,
-    Anomaly, PolicyHit, RiskSignal, CausalLink, Recommendation,
-    RiskState, get_shared_state
-)
+import os
+import re
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
+from blackboard import ReasoningCycle, SharedState, get_shared_state
 from observation import ObservationLayer, get_observation_layer
-from agents.compliance_agent import POLICIES
+
+try:
+    from .vector_store import ChronosVectorStore
+except ModuleNotFoundError:
+    ChronosVectorStore = None
+
+try:
+    from langgraph.graph import END, StateGraph
+except ModuleNotFoundError:
+    StateGraph = None
+    END = None
+
+
+# Policy definitions are kept here to avoid import cycles.
+POLICIES: Dict[str, Dict[str, str]] = {
+    "SECURITY_POLICY_001": {
+        "name": "Unauthorized Access Prevention",
+        "description": "No direct access to production databases from development environments",
+        "severity": "HIGH",
+    },
+    "WORKFLOW_POLICY_002": {
+        "name": "Deployment Sequence Validation",
+        "description": "All deployment steps must execute in correct order",
+        "severity": "MEDIUM",
+    },
+    "RESOURCE_POLICY_003": {
+        "name": "Resource Utilization Limits",
+        "description": "CPU usage must not exceed 90% for sustained periods",
+        "severity": "MEDIUM",
+    },
+    "COMPLIANCE_POLICY_004": {
+        "name": "Audit Trail Maintenance",
+        "description": "All system changes must have audit trail entries",
+        "severity": "LOW",
+    },
+    "DATA_POLICY_005": {
+        "name": "Data Retention Compliance",
+        "description": "Logs must be retained for minimum 90 days",
+        "severity": "LOW",
+    },
+}
 
 
 class QueryType(Enum):
-    """Types of reasoning queries."""
     RISK_STATUS = "risk_status"
     CAUSAL_ANALYSIS = "causal_analysis"
     COMPLIANCE_CHECK = "compliance_check"
@@ -47,18 +76,17 @@ class QueryType(Enum):
 
 @dataclass
 class QueryDecomposition:
-    """Decomposed query with sub-queries."""
     original_query: str
     query_type: QueryType
     sub_queries: List[str]
     target_agents: List[str]
+    keywords: List[str]
 
 
 @dataclass
 class Evidence:
-    """A piece of evidence supporting an answer."""
     id: str
-    type: str  # anomaly, policy_hit, risk_signal, causal_link, event
+    type: str
     source_agent: str
     summary: str
     confidence: float
@@ -67,18 +95,13 @@ class Evidence:
 
 @dataclass
 class RAGResponse:
-    """
-    RAG Output Format (Non-Negotiable).
-    
-    If RAG returns only text → judges will call it fake.
-    """
     answer: str
-    supporting_evidence: List[str]  # Evidence IDs
+    supporting_evidence: List[str]
     evidence_details: List[Evidence]
     confidence: float
     uncertainty: str
     query_decomposition: Dict[str, Any]
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "answer": self.answer,
@@ -86,452 +109,556 @@ class RAGResponse:
             "evidence_details": [asdict(e) for e in self.evidence_details],
             "confidence": self.confidence,
             "uncertainty": self.uncertainty,
-            "query_decomposition": self.query_decomposition
+            "query_decomposition": self.query_decomposition,
         }
 
 
 class QueryDecomposerAgent:
-    """
-    Decomposes user queries into structured sub-queries.
-    
-    Example:
-    "Why is the system at risk right now?"
-    
-    Decomposed as:
-    - Current risk state?
-    - Recent anomalies?
-    - Causal contributors?
-    - Policy proximity?
-    - Predicted next state?
-    """
-    
-    # Query patterns to detect intent
-    PATTERNS = {
+    PATTERNS: Dict[QueryType, List[str]] = {
         QueryType.RISK_STATUS: [
-            r"risk", r"at risk", r"danger", r"threat", r"unsafe",
-            r"status", r"health", r"safe"
+            r"\brisk\b",
+            r"\bunsafe\b",
+            r"\bdanger\b",
+            r"\bincident\b",
+            r"\bhealth\b",
+            r"\bstatus\b",
         ],
         QueryType.CAUSAL_ANALYSIS: [
-            r"why", r"cause", r"reason", r"because", r"due to",
-            r"root cause", r"explain", r"what caused"
+            r"\bwhy\b",
+            r"\bcause\b",
+            r"\broot\b",
+            r"\breason\b",
+            r"\bdue to\b",
+            r"\bwhat happened\b",
         ],
         QueryType.COMPLIANCE_CHECK: [
-            r"compliance", r"policy", r"violat", r"rule", r"regulation",
-            r"audit", r"compliant"
+            r"\bcompliance\b",
+            r"\bpolicy\b",
+            r"\baudit\b",
+            r"\bviolation\b",
+            r"\bsox\b",
+            r"\bgdpr\b",
+            r"\brule\b",
         ],
         QueryType.WORKFLOW_HEALTH: [
-            r"workflow", r"onboarding", r"deploy", r"pipeline",
-            r"process", r"step", r"delay"
+            r"\bworkflow\b",
+            r"\bdeploy\b",
+            r"\bpipeline\b",
+            r"\bstep\b",
+            r"\bsla\b",
+            r"\bonboarding\b",
+            r"\bjob\b",
         ],
         QueryType.RESOURCE_STATUS: [
-            r"cpu", r"memory", r"network", r"latency", r"resource",
-            r"server", r"capacity", r"performance"
+            r"\bcpu\b",
+            r"\bmemory\b",
+            r"\bnetwork\b",
+            r"\blatency\b",
+            r"\bresource\b",
+            r"\bcapacity\b",
+            r"\butilization\b",
+            r"\bpod\b",
+            r"\bnode\b",
         ],
         QueryType.PREDICTION: [
-            r"will", r"predict", r"forecast", r"future", r"next",
-            r"trend", r"continue", r"break"
-        ]
+            r"\bpredict\b",
+            r"\bforecast\b",
+            r"\bnext\b",
+            r"\bfuture\b",
+            r"\bwhat if\b",
+            r"\btrajectory\b",
+            r"\bwill\b",
+        ],
     }
-    
-    # Agent mapping for query types
-    AGENT_MAPPING = {
+
+    AGENT_MAPPING: Dict[QueryType, List[str]] = {
         QueryType.RISK_STATUS: ["RiskForecastAgent", "MasterAgent"],
         QueryType.CAUSAL_ANALYSIS: ["CausalAgent", "WorkflowAgent", "ResourceAgent"],
-        QueryType.COMPLIANCE_CHECK: ["ComplianceAgent"],
-        QueryType.WORKFLOW_HEALTH: ["WorkflowAgent"],
-        QueryType.RESOURCE_STATUS: ["ResourceAgent"],
-        QueryType.PREDICTION: ["RiskForecastAgent", "CausalAgent"],
-        QueryType.GENERAL: ["MasterAgent"]
+        QueryType.COMPLIANCE_CHECK: ["ComplianceAgent", "RiskForecastAgent"],
+        QueryType.WORKFLOW_HEALTH: ["WorkflowAgent", "CausalAgent"],
+        QueryType.RESOURCE_STATUS: ["ResourceAgent", "AdaptiveBaselineAgent"],
+        QueryType.PREDICTION: ["RiskForecastAgent", "CausalAgent", "ScenarioInjectionAgent"],
+        QueryType.GENERAL: ["MasterAgent", "QueryAgent"],
     }
-    
+
     def decompose(self, query: str) -> QueryDecomposition:
-        """Decompose a natural language query."""
-        query_lower = query.lower()
-        
-        # Detect query type
-        query_type = self._detect_query_type(query_lower)
-        
-        # Generate sub-queries based on type
-        sub_queries = self._generate_sub_queries(query_lower, query_type)
-        
-        # Map to target agents
+        q = (query or "").strip()
+        q_lower = q.lower()
+        query_type = self._detect_query_type(q_lower)
+        keywords = self._extract_keywords(q_lower)
+        sub_queries = self._generate_sub_queries(query_type, keywords)
         target_agents = self.AGENT_MAPPING.get(query_type, ["MasterAgent"])
-        
         return QueryDecomposition(
-            original_query=query,
+            original_query=q,
             query_type=query_type,
             sub_queries=sub_queries,
-            target_agents=target_agents
+            target_agents=target_agents,
+            keywords=keywords,
         )
-    
+
     def _detect_query_type(self, query: str) -> QueryType:
-        """Detect the type of query based on patterns."""
-        scores = {qt: 0 for qt in QueryType}
-        
-        for query_type, patterns in self.PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, query):
-                    scores[query_type] += 1
-        
-        # Get highest scoring type
-        max_score = max(scores.values())
-        if max_score == 0:
-            return QueryType.GENERAL
-        
-        for qt, score in scores.items():
-            if score == max_score:
-                return qt
-        
-        return QueryType.GENERAL
-    
-    def _generate_sub_queries(self, query: str, query_type: QueryType) -> List[str]:
-        """Generate sub-queries for decomposition."""
-        sub_queries = []
-        
+        best_type = QueryType.GENERAL
+        best_score = 0
+        for qtype, patterns in self.PATTERNS.items():
+            score = 0
+            for pat in patterns:
+                if re.search(pat, query):
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_type = qtype
+        return best_type
+
+    def _extract_keywords(self, query: str) -> List[str]:
+        words = re.findall(r"[a-zA-Z0-9_]{3,}", query.lower())
+        stop = {
+            "what", "why", "when", "where", "which", "show", "tell", "about", "with", "from",
+            "that", "this", "then", "than", "there", "their", "your", "have", "will", "should",
+            "could", "would", "please", "into", "over", "under", "across", "current", "latest",
+            "issue", "issues", "system", "workflow", "resource", "compliance", "risk",
+        }
+        unique: List[str] = []
+        for w in words:
+            if w in stop:
+                continue
+            if w not in unique:
+                unique.append(w)
+        return unique[:12]
+
+    def _generate_sub_queries(self, query_type: QueryType, keywords: List[str]) -> List[str]:
+        focus = ", ".join(keywords[:4]) if keywords else "latest cycle"
+        common = [
+            f"Top findings related to {focus}",
+            "Most relevant evidence IDs and confidence",
+        ]
+        if query_type == QueryType.CAUSAL_ANALYSIS:
+            return common + ["Likely cause-effect chain", "Immediate mitigation sequence"]
+        if query_type == QueryType.COMPLIANCE_CHECK:
+            return common + ["Active policy hits", "Compliance risk and remediation"]
+        if query_type == QueryType.WORKFLOW_HEALTH:
+            return common + ["Delayed/failed workflow steps", "Downstream impact"]
+        if query_type == QueryType.RESOURCE_STATUS:
+            return common + ["Sustained resource anomalies", "Capacity or latency hotspots"]
+        if query_type == QueryType.PREDICTION:
+            return common + ["Projected state trajectory", "Preventive actions in next 15 minutes"]
         if query_type == QueryType.RISK_STATUS:
-            sub_queries = [
-                "What is the current risk state?",
-                "Are there active anomalies?",
-                "What is the projected risk trajectory?",
-                "Are there policy violations?"
-            ]
-        elif query_type == QueryType.CAUSAL_ANALYSIS:
-            sub_queries = [
-                "What anomalies have been detected?",
-                "What are the causal links?",
-                "What is the root cause chain?",
-                "What evidence supports this?"
-            ]
-        elif query_type == QueryType.COMPLIANCE_CHECK:
-            sub_queries = [
-                "Which policies are being monitored?",
-                "Are there active violations?",
-                "What is the compliance rate?",
-                "Which policies are at risk?"
-            ]
-        elif query_type == QueryType.WORKFLOW_HEALTH:
-            sub_queries = [
-                "What workflows are being tracked?",
-                "Are there workflow delays?",
-                "Are any steps being skipped?",
-                "What is the workflow success rate?"
-            ]
-        elif query_type == QueryType.RESOURCE_STATUS:
-            sub_queries = [
-                "What resources are being monitored?",
-                "Are there sustained spikes?",
-                "Is there resource drift?",
-                "What is the trend?"
-            ]
-        elif query_type == QueryType.PREDICTION:
-            sub_queries = [
-                "What is the current trajectory?",
-                "What is the projected state?",
-                "What is the time horizon?",
-                "What factors are contributing?"
-            ]
-        else:
-            sub_queries = [
-                "What is the system status?",
-                "Are there active insights?",
-                "What requires attention?"
-            ]
-        
-        return sub_queries
+            return common + ["Current risk posture", "Top drivers and next actions"]
+        return common + ["Overall platform status", "Priority action checklist"]
 
 
 class ReasoningSynthesizer:
-    """
-    Synthesizes answers from retrieved evidence.
-    
-    This is NOT LLM-based detection.
-    It structures existing agent outputs into answers.
-    """
-    
     def __init__(self, state: SharedState, observation: ObservationLayer):
         self._state = state
         self._observation = observation
-    
+        enable_vector = os.getenv("ENABLE_VECTOR_STORE", "false").lower().strip() == "true"
+        self._vector_store = ChronosVectorStore() if (ChronosVectorStore and enable_vector) else None
+
     def retrieve_evidence(
         self,
         decomposition: QueryDecomposition,
-        cycles: List[ReasoningCycle]
+        cycles: List[ReasoningCycle],
+        max_items: int = 18,
     ) -> List[Evidence]:
-        """Retrieve relevant evidence based on query decomposition."""
-        evidence = []
-        
-        # Get evidence from recent cycles
-        for cycle in cycles[-5:]:  # Last 5 cycles
-            # Anomalies
-            for anomaly in cycle.anomalies:
-                if self._is_relevant(anomaly, decomposition):
-                    evidence.append(Evidence(
-                        id=anomaly.anomaly_id,
+        query_text = " ".join([decomposition.original_query] + decomposition.sub_queries).lower()
+        gathered: List[Tuple[float, Evidence]] = []
+        seen_ids: set[str] = set()
+
+        # Optional semantic retrieval first.
+        if self._vector_store:
+            try:
+                vector_hits = self._vector_store.semantic_search(query_text, n_results=12)
+                for hit in vector_hits:
+                    meta = hit.get("metadata", {})
+                    ev = Evidence(
+                        id=str(hit.get("id", f"vec_{len(gathered)}")),
+                        type=str(meta.get("type", "vector")),
+                        source_agent=str(meta.get("agent", "VectorStore")),
+                        summary=str(hit.get("content", "")),
+                        confidence=float(meta.get("confidence", 0.75)),
+                        timestamp=str(meta.get("timestamp", datetime.utcnow().isoformat())),
+                    )
+                    score = self._relevance_score(ev.summary, query_text, ev.type, decomposition.query_type)
+                    gathered.append((score + 0.3, ev))
+                    seen_ids.add(ev.id)
+            except Exception:
+                pass
+
+        # Deterministic retrieval from latest cycles.
+        for cycle in cycles[-12:]:
+            for a in cycle.anomalies:
+                self._add(
+                    gathered,
+                    seen_ids,
+                    Evidence(
+                        id=a.anomaly_id,
                         type="anomaly",
-                        source_agent=anomaly.agent,
-                        summary=anomaly.description,
-                        confidence=anomaly.confidence,
-                        timestamp=anomaly.timestamp.isoformat()
-                    ))
-            
-            # Policy hits
-            for hit in cycle.policy_hits:
-                if self._is_relevant(hit, decomposition):
-                    evidence.append(Evidence(
-                        id=hit.hit_id,
+                        source_agent=a.agent,
+                        summary=a.description,
+                        confidence=float(a.confidence),
+                        timestamp=a.timestamp.isoformat(),
+                    ),
+                    query_text,
+                    decomposition.query_type,
+                )
+            for p in cycle.policy_hits:
+                self._add(
+                    gathered,
+                    seen_ids,
+                    Evidence(
+                        id=p.hit_id,
                         type="policy_hit",
-                        source_agent=hit.agent,
-                        summary=hit.description,
-                        confidence=0.9,  # Policy violations are high confidence
-                        timestamp=hit.timestamp.isoformat()
-                    ))
-            
-            # Risk signals
-            for signal in cycle.risk_signals:
-                if self._is_relevant(signal, decomposition):
-                    evidence.append(Evidence(
-                        id=signal.signal_id,
+                        source_agent=p.agent,
+                        summary=p.description,
+                        confidence=0.92,
+                        timestamp=p.timestamp.isoformat(),
+                    ),
+                    query_text,
+                    decomposition.query_type,
+                )
+            for r in cycle.risk_signals:
+                self._add(
+                    gathered,
+                    seen_ids,
+                    Evidence(
+                        id=r.signal_id,
                         type="risk_signal",
                         source_agent="RiskForecastAgent",
-                        summary=signal.reasoning,
-                        confidence=signal.confidence,
-                        timestamp=signal.timestamp.isoformat()
-                    ))
-            
-            # Causal links
-            for link in cycle.causal_links:
-                if self._is_relevant(link, decomposition):
-                    evidence.append(Evidence(
-                        id=link.link_id,
+                        summary=r.reasoning,
+                        confidence=float(r.confidence),
+                        timestamp=r.timestamp.isoformat(),
+                    ),
+                    query_text,
+                    decomposition.query_type,
+                )
+            for c in cycle.causal_links:
+                self._add(
+                    gathered,
+                    seen_ids,
+                    Evidence(
+                        id=c.link_id,
                         type="causal_link",
                         source_agent="CausalAgent",
-                        summary=f"{link.cause} → {link.effect}: {link.reasoning}",
-                        confidence=link.confidence,
-                        timestamp=link.timestamp.isoformat()
-                    ))
-        
-        return evidence
-    
-    def _is_relevant(self, item: Any, decomposition: QueryDecomposition) -> bool:
-        """Check if an item is relevant to the query."""
-        query_type = decomposition.query_type
-        
-        # Check by query type
-        if query_type == QueryType.RISK_STATUS:
-            return True  # All signals relevant for risk
-        
-        if query_type == QueryType.CAUSAL_ANALYSIS:
-            return hasattr(item, 'link_id') or hasattr(item, 'anomaly_id')
-        
-        if query_type == QueryType.COMPLIANCE_CHECK:
-            return hasattr(item, 'policy_id') or hasattr(item, 'hit_id')
-        
-        if query_type == QueryType.WORKFLOW_HEALTH:
-            if hasattr(item, 'type'):
-                return 'WORKFLOW' in item.type
-            return False
-        
-        if query_type == QueryType.RESOURCE_STATUS:
-            if hasattr(item, 'type'):
-                return 'RESOURCE' in item.type
-            return False
-        
-        return True  # Default: include
-    
+                        summary=f"{c.cause} → {c.effect}: {c.reasoning}",
+                        confidence=float(c.confidence),
+                        timestamp=c.timestamp.isoformat(),
+                    ),
+                    query_text,
+                    decomposition.query_type,
+                )
+            for rec2 in cycle.recommendations_v2:
+                self._add(
+                    gathered,
+                    seen_ids,
+                    Evidence(
+                        id=rec2.rec_id,
+                        type="recommendation",
+                        source_agent="RecommendationEngineAgent",
+                        summary=f"{rec2.action_code}: {rec2.action_description}",
+                        confidence=float(rec2.confidence),
+                        timestamp=rec2.timestamp.isoformat(),
+                    ),
+                    query_text,
+                    decomposition.query_type,
+                )
+
+        # If still sparse, add recent raw observations.
+        if len(gathered) < 6:
+            events = self._observation.get_recent_events(count=50)
+            metrics = self._observation.get_recent_metrics(count=50)
+            for e in events:
+                ev = Evidence(
+                    id=e.event_id,
+                    type="event",
+                    source_agent="ObservationLayer",
+                    summary=f"{e.type} actor={e.actor} workflow={e.workflow_id or 'n/a'} resource={e.resource or 'n/a'}",
+                    confidence=0.7,
+                    timestamp=e.timestamp.isoformat(),
+                )
+                self._add(gathered, seen_ids, ev, query_text, decomposition.query_type)
+            for m in metrics:
+                ev = Evidence(
+                    id=f"metric_{m.resource_id}_{m.metric}_{int(m.timestamp.timestamp())}",
+                    type="metric",
+                    source_agent="ObservationLayer",
+                    summary=f"{m.resource_id} {m.metric}={m.value}",
+                    confidence=0.7,
+                    timestamp=m.timestamp.isoformat(),
+                )
+                self._add(gathered, seen_ids, ev, query_text, decomposition.query_type)
+
+        if not gathered:
+            return []
+
+        gathered.sort(key=lambda x: x[0], reverse=True)
+        return [ev for _, ev in gathered[:max_items]]
+
+    def _add(
+        self,
+        gathered: List[Tuple[float, Evidence]],
+        seen_ids: set[str],
+        evidence: Evidence,
+        query_text: str,
+        query_type: QueryType,
+    ) -> None:
+        if evidence.id in seen_ids:
+            return
+        score = self._relevance_score(evidence.summary, query_text, evidence.type, query_type)
+        # keep weak signals only if we have very little.
+        if score < 0.05 and len(gathered) > 10:
+            return
+        seen_ids.add(evidence.id)
+        gathered.append((score, evidence))
+
+    def _relevance_score(self, text: str, query: str, ev_type: str, qtype: QueryType) -> float:
+        t_words = set(re.findall(r"[a-zA-Z0-9_]{3,}", (text or "").lower()))
+        q_words = set(re.findall(r"[a-zA-Z0-9_]{3,}", (query or "").lower()))
+        overlap = len(t_words.intersection(q_words))
+        union = max(1, len(q_words))
+        base = overlap / union
+
+        type_bonus = 0.0
+        if qtype == QueryType.CAUSAL_ANALYSIS and ev_type == "causal_link":
+            type_bonus += 0.45
+        if qtype == QueryType.COMPLIANCE_CHECK and ev_type == "policy_hit":
+            type_bonus += 0.45
+        if qtype == QueryType.RISK_STATUS and ev_type == "risk_signal":
+            type_bonus += 0.4
+        if qtype == QueryType.WORKFLOW_HEALTH and ev_type == "anomaly":
+            type_bonus += 0.3
+        if qtype == QueryType.RESOURCE_STATUS and ev_type in {"anomaly", "metric"}:
+            type_bonus += 0.25
+        if ev_type == "recommendation":
+            type_bonus += 0.1
+        return min(1.0, base + type_bonus)
+
     def synthesize_answer(
         self,
         decomposition: QueryDecomposition,
         evidence: List[Evidence],
-        cycles: List[ReasoningCycle]
+        cycles: List[ReasoningCycle],
     ) -> str:
-        """Synthesize a natural language answer from evidence."""
-        query_type = decomposition.query_type
-        
         if not evidence and not cycles:
-            return "No data available yet. Run simulation to generate system activity."
-        
-        # Build answer based on query type
-        if query_type == QueryType.RISK_STATUS:
-            return self._synthesize_risk_answer(evidence, cycles)
-        elif query_type == QueryType.CAUSAL_ANALYSIS:
-            return self._synthesize_causal_answer(evidence, cycles)
-        elif query_type == QueryType.COMPLIANCE_CHECK:
-            return self._synthesize_compliance_answer(evidence, cycles)
-        elif query_type == QueryType.WORKFLOW_HEALTH:
-            return self._synthesize_workflow_answer(evidence, cycles)
-        elif query_type == QueryType.RESOURCE_STATUS:
-            return self._synthesize_resource_answer(evidence, cycles)
-        elif query_type == QueryType.PREDICTION:
-            return self._synthesize_prediction_answer(evidence, cycles)
-        else:
-            return self._synthesize_general_answer(evidence, cycles)
-    
-    def _synthesize_risk_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize risk status answer."""
-        risk_signals = [e for e in evidence if e.type == "risk_signal"]
-        anomalies = [e for e in evidence if e.type == "anomaly"]
-        
-        if not risk_signals and not anomalies:
-            return "The system is currently operating normally with no elevated risk signals detected."
-        
-        parts = []
-        
-        if risk_signals:
-            latest = risk_signals[-1]
-            parts.append(f"Risk analysis indicates: {latest.summary}")
-        
-        if anomalies:
-            anomaly_types = set(a.summary.split()[0] for a in anomalies[:3])
-            parts.append(f"Active anomalies detected: {', '.join(anomaly_types)}")
-        
-        return " ".join(parts)
-    
-    def _synthesize_causal_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize causal analysis answer."""
-        causal = [e for e in evidence if e.type == "causal_link"]
-        
+            return "No data available yet. Run one analysis cycle or simulation, then ask again."
+
+        qtype = decomposition.query_type
+        if qtype == QueryType.RISK_STATUS:
+            return self._risk_answer(evidence, cycles)
+        if qtype == QueryType.CAUSAL_ANALYSIS:
+            return self._causal_answer(evidence)
+        if qtype == QueryType.COMPLIANCE_CHECK:
+            return self._compliance_answer(evidence)
+        if qtype == QueryType.WORKFLOW_HEALTH:
+            return self._workflow_answer(evidence)
+        if qtype == QueryType.RESOURCE_STATUS:
+            return self._resource_answer(evidence)
+        if qtype == QueryType.PREDICTION:
+            return self._prediction_answer(evidence)
+        return self._general_answer(evidence, cycles)
+
+    def _risk_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
+        risks = [e for e in evidence if e.type == "risk_signal"]
+        anoms = [e for e in evidence if e.type == "anomaly"][:3]
+        policies = [e for e in evidence if e.type == "policy_hit"][:2]
+        if not risks and not anoms:
+            return "Current risk appears controlled. No high-priority risk signals in the latest evidence."
+        lead = risks[0].summary if risks else "Risk is elevated due to active anomaly signals."
+        details: List[str] = []
+        if anoms:
+            details.append("Top anomalies: " + " | ".join(a.summary for a in anoms))
+        if policies:
+            details.append("Policy exposure: " + " | ".join(p.summary for p in policies))
+        details.append(
+            "Next 15 minutes: contain blast radius, stabilize critical path, verify trend is improving."
+        )
+        return f"{lead} " + " ".join(details)
+
+    def _causal_answer(self, evidence: List[Evidence]) -> str:
+        causal = [e for e in evidence if e.type == "causal_link"][:4]
         if not causal:
-            return "No causal relationships have been identified in the current analysis window."
-        
-        causes = []
-        for c in causal[:3]:
-            causes.append(c.summary)
-        
-        return f"Causal analysis identified the following relationships: {'; '.join(causes)}"
-    
-    def _synthesize_compliance_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize compliance answer."""
-        violations = [e for e in evidence if e.type == "policy_hit"]
-        
-        total_policies = len(POLICIES)
-        violated = len(set(e.summary.split("'")[1] if "'" in e.summary else "" for e in violations))
-        
-        if not violations:
-            return f"All {total_policies} monitored policies are currently compliant. No violations detected."
-        
-        return f"{len(violations)} policy violations detected across {violated} policies. Review recommended for: {violations[0].summary}"
-    
-    def _synthesize_workflow_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize workflow health answer."""
-        workflow_issues = [e for e in evidence if "WORKFLOW" in e.type.upper() or "workflow" in e.summary.lower()]
-        
-        if not workflow_issues:
-            return "Monitored workflows are executing within expected parameters."
-        
-        issues = [e.summary for e in workflow_issues[:3]]
-        return f"Workflow anomalies detected: {'; '.join(issues)}"
-    
-    def _synthesize_resource_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize resource status answer."""
-        resource_issues = [e for e in evidence if "RESOURCE" in (e.type or "").upper() or "resource" in e.summary.lower()]
-        
-        if not resource_issues:
-            return "Resource utilization is within normal bounds across all monitored systems."
-        
-        issues = [e.summary for e in resource_issues[:3]]
-        return f"Resource concerns identified: {'; '.join(issues)}"
-    
-    def _synthesize_prediction_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize prediction answer."""
-        risk_signals = [e for e in evidence if e.type == "risk_signal"]
-        
-        if not risk_signals:
-            return "Current trajectory shows stable system behavior. No significant changes predicted."
-        
-        latest = risk_signals[-1]
-        return f"Predictive analysis: {latest.summary}"
-    
-    def _synthesize_general_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
-        """Synthesize general answer."""
+            return "No strong cause-effect chain found yet in current window. Run another cycle for clearer causality."
+        chain = []
+        seen = set()
+        for c in causal:
+            rel = c.summary.split(":")[0].strip()
+            if rel not in seen:
+                seen.add(rel)
+                chain.append(rel)
+        return (
+            f"Most likely chain: {' | '.join(chain)}. "
+            "Recommended flow: contain now, fix upstream cause, verify downstream recovery."
+        )
+
+    def _compliance_answer(self, evidence: List[Evidence]) -> str:
+        hits = [e for e in evidence if e.type == "policy_hit"]
+        if not hits:
+            return f"No active policy violations in top evidence. Monitored policy set size: {len(POLICIES)}."
+        return (
+            f"{len(hits)} compliance finding(s) in current window. Primary: {hits[0].summary}. "
+            "Checklist: stop violating path, restore approval/least-privilege controls, re-verify in next cycle."
+        )
+
+    def _workflow_answer(self, evidence: List[Evidence]) -> str:
+        wf = [e for e in evidence if "workflow" in e.summary.lower() or "deploy" in e.summary.lower()]
+        if not wf:
+            return "No critical workflow degradations detected in top evidence."
+        return (
+            f"Workflow risk detected: {wf[0].summary}. "
+            "Focus on delayed/failed steps first, then remove the upstream bottleneck before replay."
+        )
+
+    def _resource_answer(self, evidence: List[Evidence]) -> str:
+        res = [e for e in evidence if any(k in e.summary.lower() for k in ("cpu", "memory", "latency", "network", "resource"))]
+        if not res:
+            return "Resource usage appears within acceptable operating range in current evidence."
+        top = " | ".join(x.summary for x in res[:2])
+        return f"Resource pressure detected: {top}. Stabilize utilization and cap retry amplification."
+
+    def _prediction_answer(self, evidence: List[Evidence]) -> str:
+        risks = [e for e in evidence if e.type == "risk_signal"]
+        if not risks:
+            return "No strong deterioration trajectory found. Continue monitoring with scenario checks."
+        return (
+            f"Projected trajectory signal: {risks[0].summary}. "
+            "Preventive action: apply containment and validation checklist before next deploy window."
+        )
+
+    def _general_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
         if not cycles:
-            return "System is initializing. No analysis cycles completed yet."
-        
+            return "System is initializing. No completed reasoning cycles yet."
         latest = cycles[-1]
-        total_findings = len(latest.anomalies) + len(latest.policy_hits) + len(latest.risk_signals)
-        
-        if total_findings == 0:
-            return "System is operating normally. All agents report nominal conditions."
-        
-        return f"Latest analysis cycle identified {total_findings} items requiring attention. {len(latest.anomalies)} anomalies, {len(latest.policy_hits)} policy issues, {len(latest.risk_signals)} risk signals."
+        top = evidence[:3]
+        top_txt = " | ".join(e.summary for e in top) if top else "No high-signal evidence ranked yet."
+        return (
+            f"Latest cycle summary: {len(latest.anomalies)} anomalies, {len(latest.policy_hits)} policy hits, "
+            f"{len(latest.risk_signals)} risk signals. Top evidence: {top_txt}"
+        )
 
 
 class AgenticRAGEngine:
-    """
-    Main RAG Engine for reasoning queries.
-    
-    This is NOT a chatbot.
-    It is a Reasoning Query Interface.
-    
-    Architecture:
-    User Query
-       ↓
-    Query Decomposer Agent
-       ↓
-    Retrieval over:
-      • Events
-      • Metrics
-      • Anomalies
-      • Risk signals
-      • Causal links
-       ↓
-    Reasoning Synthesizer
-       ↓
-    Answer + Evidence
-    """
-    
-    def __init__(self):
+    """Dynamic RAG engine with optional LangGraph orchestration."""
+
+    def __init__(
+        self,
+        state: Optional[SharedState] = None,
+        observation: Optional[ObservationLayer] = None,
+    ):
+        self._state = state or get_shared_state()
+        self._observation = observation or get_observation_layer()
         self._decomposer = QueryDecomposerAgent()
-        self._state = get_shared_state()
-        self._observation = get_observation_layer()
         self._synthesizer = ReasoningSynthesizer(self._state, self._observation)
-    
-    def query(self, user_query: str) -> RAGResponse:
-        """
-        Process a reasoning query.
-        
-        Returns structured answer with evidence.
-        """
-        # 1. Decompose query
-        decomposition = self._decomposer.decompose(user_query)
-        
-        # 2. Get cycles from state
-        cycles = self._state._completed_cycles
-        
-        # 3. Retrieve evidence
+        enable_vector = os.getenv("ENABLE_VECTOR_STORE", "false").lower().strip() == "true"
+        self._vector_store = ChronosVectorStore() if (ChronosVectorStore and enable_vector) else None
+        self._use_langgraph = (
+            os.getenv("ENABLE_LANGGRAPH", "false").lower().strip() == "true"
+            and StateGraph is not None
+        )
+        self._langgraph = self._build_langgraph() if self._use_langgraph else None
+
+    def _build_langgraph(self):
+        if StateGraph is None or END is None:
+            return None
+        graph = StateGraph(dict)
+
+        def node_decompose(state: Dict[str, Any]) -> Dict[str, Any]:
+            decomp = self._decomposer.decompose(state["query_text"])
+            state["decomposition"] = decomp
+            return state
+
+        def node_retrieve(state: Dict[str, Any]) -> Dict[str, Any]:
+            cycles = self._state.get_recent_cycles(count=12)
+            evidence = self._synthesizer.retrieve_evidence(state["decomposition"], cycles)
+            state["cycles"] = cycles
+            state["evidence"] = evidence
+            return state
+
+        def node_synthesize(state: Dict[str, Any]) -> Dict[str, Any]:
+            answer = self._synthesizer.synthesize_answer(
+                state["decomposition"], state.get("evidence", []), state.get("cycles", [])
+            )
+            state["answer"] = answer
+            return state
+
+        graph.add_node("decompose", node_decompose)
+        graph.add_node("retrieve", node_retrieve)
+        graph.add_node("synthesize", node_synthesize)
+        graph.set_entry_point("decompose")
+        graph.add_edge("decompose", "retrieve")
+        graph.add_edge("retrieve", "synthesize")
+        graph.add_edge("synthesize", END)
+        return graph.compile()
+
+    def query(self, query_text: str) -> RAGResponse:
+        q = (query_text or "").strip()
+        if not q:
+            q = "system status"
+
+        if self._langgraph is not None:
+            try:
+                state = self._langgraph.invoke({"query_text": q})
+                decomposition: QueryDecomposition = state["decomposition"]
+                evidence: List[Evidence] = state.get("evidence", [])
+                answer: str = state.get("answer", "")
+                cycles = state.get("cycles", [])
+                return self._build_response(q, decomposition, evidence, answer, cycles, used_langgraph=True)
+            except Exception:
+                # Fall back to deterministic pipeline if LangGraph path fails.
+                pass
+
+        decomposition = self._decomposer.decompose(q)
+        cycles = self._state.get_recent_cycles(count=12)
         evidence = self._synthesizer.retrieve_evidence(decomposition, cycles)
-        
-        # 4. Synthesize answer
         answer = self._synthesizer.synthesize_answer(decomposition, evidence, cycles)
-        
-        # 5. Calculate overall confidence
-        if evidence:
-            confidence = sum(e.confidence for e in evidence) / len(evidence)
-        else:
-            confidence = 0.5  # Default when no evidence
-        
-        # 6. Build response
+        return self._build_response(q, decomposition, evidence, answer, cycles, used_langgraph=False)
+
+    def _build_response(
+        self,
+        query_text: str,
+        decomposition: QueryDecomposition,
+        evidence: List[Evidence],
+        answer: str,
+        cycles: List[ReasoningCycle],
+        used_langgraph: bool,
+    ) -> RAGResponse:
+        confidence = self._calculate_confidence(evidence)
+        uncertainty = self._estimate_uncertainty(evidence, cycles)
         return RAGResponse(
             answer=answer,
             supporting_evidence=[e.id for e in evidence],
             evidence_details=evidence,
-            confidence=round(confidence, 2),
-            uncertainty="Analysis based on simulated environment",
+            confidence=confidence,
+            uncertainty=uncertainty,
             query_decomposition={
-                "original_query": decomposition.original_query,
                 "query_type": decomposition.query_type.value,
+                "type": decomposition.query_type.value,
                 "sub_queries": decomposition.sub_queries,
-                "target_agents": decomposition.target_agents
-            }
+                "target_agents": decomposition.target_agents,
+                "keywords": decomposition.keywords,
+                "orchestrator": "langgraph" if used_langgraph else "deterministic",
+                "original_query": query_text,
+            },
         )
 
+    def _calculate_confidence(self, evidence: List[Evidence]) -> float:
+        if not evidence:
+            return 0.0
+        scores = [max(0.0, min(1.0, float(e.confidence))) for e in evidence[:10]]
+        avg = sum(scores) / len(scores)
+        # Evidence volume bonus capped.
+        bonus = min(0.08, 0.01 * max(0, len(evidence) - 3))
+        return round(min(1.0, avg + bonus), 4)
 
-# Singleton instance
-_rag_engine: Optional[AgenticRAGEngine] = None
+    def _estimate_uncertainty(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
+        if not cycles:
+            return "High"
+        if len(evidence) >= 10:
+            return "Low"
+        if len(evidence) >= 5:
+            return "Medium"
+        return "High"
 
 
 def get_rag_engine() -> AgenticRAGEngine:
-    """Get the singleton RAG engine instance."""
-    global _rag_engine
-    if _rag_engine is None:
-        _rag_engine = AgenticRAGEngine()
-    return _rag_engine
+    """Compatibility singleton accessor used by existing agents."""
+    if not hasattr(get_rag_engine, "_instance"):
+        get_rag_engine._instance = AgenticRAGEngine()
+    return get_rag_engine._instance

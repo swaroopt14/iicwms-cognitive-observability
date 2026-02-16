@@ -29,6 +29,7 @@ from blackboard import (
     SharedState, RiskSignal, RiskState,
     Anomaly, PolicyHit
 )
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 @dataclass
@@ -88,8 +89,32 @@ class RiskForecastAgent:
     def __init__(self):
         # Track risk profiles: entity -> profile
         self._profiles: Dict[str, EntityRiskProfile] = {}
+        self._use_langgraph = is_langgraph_enabled()
     
     def analyze(
+        self,
+        anomalies: List[Anomaly],
+        policy_hits: List[PolicyHit],
+        state: SharedState
+    ) -> List[RiskSignal]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {
+                    "anomalies": anomalies,
+                    "policy_hits": policy_hits,
+                    "state": state,
+                    "signals": [],
+                },
+                [
+                    ("accumulate_anomalies", self._graph_accumulate_anomalies),
+                    ("accumulate_policy_hits", self._graph_accumulate_policy_hits),
+                    ("emit_risk_signals", self._graph_emit_risk_signals),
+                ],
+            )
+            return graph_state.get("signals", [])
+        return self._analyze_core(anomalies, policy_hits, state)
+
+    def _analyze_core(
         self,
         anomalies: List[Anomaly],
         policy_hits: List[PolicyHit],
@@ -161,6 +186,55 @@ class RiskForecastAgent:
                 profile.current_state = projected
         
         return signals
+
+    def _graph_accumulate_anomalies(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        for anomaly in graph_state["anomalies"]:
+            entity = self._extract_entity(anomaly)
+            if not entity:
+                continue
+            entity_type = self._determine_entity_type(entity)
+            if entity not in self._profiles:
+                self._profiles[entity] = EntityRiskProfile(entity=entity, entity_type=entity_type)
+            profile = self._profiles[entity]
+            profile.anomaly_count += 1
+            profile.last_updated = datetime.utcnow()
+        return graph_state
+
+    def _graph_accumulate_policy_hits(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        for hit in graph_state["policy_hits"]:
+            entity = self._extract_entity_from_hit(hit)
+            if not entity:
+                continue
+            entity_type = self._determine_entity_type(entity)
+            if entity not in self._profiles:
+                self._profiles[entity] = EntityRiskProfile(entity=entity, entity_type=entity_type)
+            profile = self._profiles[entity]
+            profile.policy_violation_count += 1
+            profile.last_updated = datetime.utcnow()
+        return graph_state
+
+    def _graph_emit_risk_signals(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        signals: List[RiskSignal] = []
+        anomalies = graph_state["anomalies"]
+        policy_hits = graph_state["policy_hits"]
+        state = graph_state["state"]
+        for entity, profile in self._profiles.items():
+            projected = profile.compute_projected_state()
+            if self._state_rank(projected) > self._state_rank(profile.current_state):
+                signal = state.add_risk_signal(
+                    entity=entity,
+                    entity_type=profile.entity_type,
+                    current_state=profile.current_state,
+                    projected_state=projected,
+                    confidence=profile.compute_confidence(),
+                    time_horizon=self._compute_time_horizon(profile, projected),
+                    reasoning=self._generate_reasoning(profile, projected),
+                    evidence_ids=self._gather_evidence_ids(profile, anomalies, policy_hits),
+                )
+                signals.append(signal)
+                profile.current_state = projected
+        graph_state["signals"] = signals
+        return graph_state
     
     def _state_rank(self, state: RiskState) -> int:
         """Get numeric rank of risk state."""

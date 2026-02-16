@@ -25,6 +25,13 @@ from enum import Enum
 import concurrent.futures
 import threading
 import time
+import os
+
+try:
+    from langgraph.graph import StateGraph, END
+except ModuleNotFoundError:
+    StateGraph = None
+    END = None
 
 from observation import ObservationLayer, ObservedEvent, ObservedMetric
 from blackboard import (
@@ -199,6 +206,11 @@ class MasterAgent:
         self._code_agent = CodeAgent()
         self._severity_engine_agent = SeverityEngineAgent()
         self._recommendation_engine_agent = RecommendationEngineAgent()
+        self._use_langgraph_agents = (
+            os.getenv("ENABLE_LANGGRAPH_AGENTS", os.getenv("ENABLE_LANGGRAPH", "false")).lower().strip() == "true"
+            and StateGraph is not None
+        )
+        self._cycle_graph = self._build_cycle_graph() if self._use_langgraph_agents else None
 
         # Neo4j graph client (lazy init)
         self._graph = None
@@ -211,6 +223,85 @@ class MasterAgent:
         self._known_root_causes: set = set()
         self._total_cycles = 0
         self._last_cycle_time: Optional[datetime] = None
+
+    def _build_cycle_graph(self):
+        """Build LangGraph orchestration for full agent chain."""
+        if StateGraph is None or END is None:
+            return None
+
+        graph = StateGraph(dict)
+
+        def workflow_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["anomalies"].extend(self._workflow_agent.analyze(s["events"], self._state))
+            return s
+
+        def resource_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["anomalies"].extend(self._resource_agent.analyze(s["metrics"], self._state))
+            return s
+
+        def compliance_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["policy_hits"].extend(self._compliance_agent.analyze(s["events"], self._state))
+            return s
+
+        def baseline_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["anomalies"].extend(self._adaptive_baseline_agent.analyze(s["metrics"], self._state))
+            return s
+
+        def code_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["anomalies"].extend(self._code_agent.analyze(s["events"], self._state))
+            return s
+
+        def risk_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["risk_signals"] = self._risk_forecast_agent.analyze(s["anomalies"], s["policy_hits"], self._state)
+            return s
+
+        def causal_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["causal_links"] = self._causal_agent.analyze(s["anomalies"], s["policy_hits"], s["risk_signals"], self._state)
+            return s
+
+        def severity_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["severity_scores"] = self._severity_engine_agent.analyze(s["anomalies"], s["policy_hits"], self._state)
+            return s
+
+        def severity_score_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["severity_score"] = self._compute_severity_score(
+                s["anomalies"], s["policy_hits"], s["risk_signals"], s["causal_links"]
+            )
+            return s
+
+        def recommendation_node(s: Dict[str, Any]) -> Dict[str, Any]:
+            s["recommendations"] = self._generate_recommendations(
+                s["anomalies"], s["policy_hits"], s["causal_links"], s["severity_score"]
+            )
+            s["recommendations_v2"] = self._recommendation_engine_agent.generate(
+                s["anomalies"], s["policy_hits"], s["causal_links"], s["severity_scores"], self._state
+            )
+            return s
+
+        graph.add_node("workflow", workflow_node)
+        graph.add_node("resource", resource_node)
+        graph.add_node("compliance", compliance_node)
+        graph.add_node("baseline", baseline_node)
+        graph.add_node("code", code_node)
+        graph.add_node("risk", risk_node)
+        graph.add_node("causal", causal_node)
+        graph.add_node("severity", severity_node)
+        graph.add_node("severity_score", severity_score_node)
+        graph.add_node("recommendation", recommendation_node)
+
+        graph.set_entry_point("workflow")
+        graph.add_edge("workflow", "resource")
+        graph.add_edge("resource", "compliance")
+        graph.add_edge("compliance", "baseline")
+        graph.add_edge("baseline", "code")
+        graph.add_edge("code", "risk")
+        graph.add_edge("risk", "causal")
+        graph.add_edge("causal", "severity")
+        graph.add_edge("severity", "severity_score")
+        graph.add_edge("severity_score", "recommendation")
+        graph.add_edge("recommendation", END)
+
+        return graph.compile()
 
     # ─────────────────────────────────────────────────────────────────────────
     # PHASE 1: PERCEPTION — Read the system pulse
@@ -299,46 +390,44 @@ class MasterAgent:
         events = self._observation.get_recent_events(count=event_window)
         metrics = self._observation.get_recent_metrics(count=metric_window)
 
-        # ── PHASE 5: DETECT (Parallel) ──
-        anomalies = []
-        policy_hits = []
+        anomalies: List[Anomaly] = []
+        policy_hits: List[PolicyHit] = []
+        risk_signals: List[RiskSignal] = []
+        causal_links: List[CausalLink] = []
+        severity_scores = []
+        recommendations: List[Recommendation] = []
+        recommendations_v2 = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            # Submit all detection agents
-            futures = {
-                pool.submit(self._workflow_agent.analyze, events, self._state): "workflow",
-                pool.submit(self._resource_agent.analyze, metrics, self._state): "resource",
-                pool.submit(self._compliance_agent.analyze, events, self._state): "compliance",
-                pool.submit(self._adaptive_baseline_agent.analyze, metrics, self._state): "baseline",
-                pool.submit(self._code_agent.analyze, events, self._state): "code",
-            }
-
-            # Collect results as they complete (fastest first)
-            for future in concurrent.futures.as_completed(futures):
-                agent_name = futures[future]
-                try:
-                    result = future.result()
-                    if agent_name == "compliance":
-                        policy_hits.extend(result)
-                    else:
-                        anomalies.extend(result)
-                except Exception as e:
-                    print(f"  [MCP] Agent '{agent_name}' failed: {e}")
-
-        # ── PHASE 6: FORECAST (Sequential — depends on Phase 5) ──
-        risk_signals = self._risk_forecast_agent.analyze(
-            anomalies, policy_hits, self._state
-        )
-
-        # ── PHASE 7: REASON (Sequential — depends on Phase 5+6) ──
-        causal_links = self._causal_agent.analyze(
-            anomalies, policy_hits, risk_signals, self._state
-        )
-
-        # ── PHASE 8: CONTEXT-AWARE SEVERITY (Sequential) ──
-        severity_scores = self._severity_engine_agent.analyze(
-            anomalies, policy_hits, self._state
-        )
+        if self._cycle_graph is not None:
+            try:
+                graph_state = self._cycle_graph.invoke({
+                    "events": events,
+                    "metrics": metrics,
+                    "anomalies": [],
+                    "policy_hits": [],
+                    "risk_signals": [],
+                    "causal_links": [],
+                    "severity_scores": [],
+                    "recommendations": [],
+                    "recommendations_v2": [],
+                    "severity_score": 0.0,
+                })
+                anomalies = graph_state["anomalies"]
+                policy_hits = graph_state["policy_hits"]
+                risk_signals = graph_state["risk_signals"]
+                causal_links = graph_state["causal_links"]
+                severity_scores = graph_state["severity_scores"]
+                recommendations = graph_state.get("recommendations", [])
+                recommendations_v2 = graph_state.get("recommendations_v2", [])
+            except Exception as e:
+                print(f"  [MCP] LangGraph orchestration failed, falling back: {e}")
+                anomalies, policy_hits, risk_signals, causal_links, severity_scores = self._run_legacy_agent_pipeline(
+                    events, metrics, workers
+                )
+        else:
+            anomalies, policy_hits, risk_signals, causal_links, severity_scores = self._run_legacy_agent_pipeline(
+                events, metrics, workers
+            )
 
         # ── PHASE 9: SYNTHESIZE ──
         severity_score = self._compute_severity_score(
@@ -349,12 +438,13 @@ class MasterAgent:
         new_roots = self._count_new_root_causes(causal_links)
 
         # ── PHASE 10: RECOMMEND ──
-        recommendations = self._generate_recommendations(
-            anomalies, policy_hits, causal_links, severity_score
-        )
-        recommendations_v2 = self._recommendation_engine_agent.generate(
-            anomalies, policy_hits, causal_links, severity_scores, self._state
-        )
+        if self._cycle_graph is None:
+            recommendations = self._generate_recommendations(
+                anomalies, policy_hits, causal_links, severity_score
+            )
+            recommendations_v2 = self._recommendation_engine_agent.generate(
+                anomalies, policy_hits, causal_links, severity_scores, self._state
+            )
 
         # ── PHASE 11: COMPLETE CYCLE ──
         cycle = self._state.complete_cycle()
@@ -395,6 +485,41 @@ class MasterAgent:
             recommendation_count=len(recommendations) + len(recommendations_v2),
             duration_ms=round(duration_ms, 3),
         )
+
+    def _run_legacy_agent_pipeline(
+        self,
+        events: List[ObservedEvent],
+        metrics: List[ObservedMetric],
+        workers: int,
+    ) -> Tuple[List[Anomaly], List[PolicyHit], List[RiskSignal], List[CausalLink], List[Any]]:
+        """Existing orchestration path kept as deterministic fallback."""
+        anomalies: List[Anomaly] = []
+        policy_hits: List[PolicyHit] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self._workflow_agent.analyze, events, self._state): "workflow",
+                pool.submit(self._resource_agent.analyze, metrics, self._state): "resource",
+                pool.submit(self._compliance_agent.analyze, events, self._state): "compliance",
+                pool.submit(self._adaptive_baseline_agent.analyze, metrics, self._state): "baseline",
+                pool.submit(self._code_agent.analyze, events, self._state): "code",
+            }
+
+            for future in concurrent.futures.as_completed(futures):
+                agent_name = futures[future]
+                try:
+                    result = future.result()
+                    if agent_name == "compliance":
+                        policy_hits.extend(result)
+                    else:
+                        anomalies.extend(result)
+                except Exception as e:
+                    print(f"  [MCP] Agent '{agent_name}' failed: {e}")
+
+        risk_signals = self._risk_forecast_agent.analyze(anomalies, policy_hits, self._state)
+        causal_links = self._causal_agent.analyze(anomalies, policy_hits, risk_signals, self._state)
+        severity_scores = self._severity_engine_agent.analyze(anomalies, policy_hits, self._state)
+        return anomalies, policy_hits, risk_signals, causal_links, severity_scores
 
     # ─────────────────────────────────────────────────────────────────────────
     # PHASE 4: SYNTHESIS — Cross-agent intelligence
@@ -715,6 +840,7 @@ class MasterAgent:
 
         return {
             "system_pulse": self._current_pulse.value,
+            "agent_orchestrator": "langgraph" if self._cycle_graph is not None else "legacy",
             "total_cycles_completed": self._total_cycles,
             "severity_trend": severity_trend,
             "consecutive_critical_cycles": self._consecutive_critical,

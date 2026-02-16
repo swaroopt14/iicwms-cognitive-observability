@@ -1,0 +1,3 @@
+# Ignore Next.js build cache
+.next/
+out/

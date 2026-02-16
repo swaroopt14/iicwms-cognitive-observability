@@ -677,7 +677,15 @@ class SharedState:
     
     def get_recent_cycles(self, count: int = 10) -> List[ReasoningCycle]:
         """Get most recent completed cycles."""
-        return self._completed_cycles[-count:]
+        with self._lock:
+            return list(self._completed_cycles[-count:])
+
+    def get_recent_cycles_desc(self, count: int = 10) -> List[ReasoningCycle]:
+        """Get most recent completed cycles in reverse chronological order."""
+        with self._lock:
+            if count <= 0:
+                return []
+            return list(reversed(self._completed_cycles[-count:]))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

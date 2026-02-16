@@ -16,6 +16,7 @@ import {
   Activity,
   Zap,
   FlaskConical,
+  Beaker,
   Bot,
   ChevronDown,
   ScrollText,
@@ -53,6 +54,7 @@ const navGroups = [
     label: 'Test',
     items: [
       { href: '/scenarios', label: 'Scenario Lab', icon: FlaskConical },
+      { href: '/what-if-sandbox', label: 'What-If Sandbox', icon: Beaker },
     ],
   },
 ];

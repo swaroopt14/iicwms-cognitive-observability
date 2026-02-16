@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 from observation import ObservedEvent
 from blackboard import SharedState, PolicyHit
+from .langgraph_runtime import run_linear_graph, is_langgraph_enabled
 
 
 @dataclass
@@ -140,8 +141,26 @@ class ComplianceAgent:
     def __init__(self):
         self._policies = {p.policy_id: p for p in POLICIES}
         self._violation_history: List[str] = []  # Track for dedup
+        self._use_langgraph = is_langgraph_enabled()
     
     def analyze(
+        self,
+        events: List[ObservedEvent],
+        state: SharedState
+    ) -> List[PolicyHit]:
+        if self._use_langgraph:
+            graph_state = run_linear_graph(
+                {"events": events, "state": state, "hits": []},
+                [("evaluate_policies", self._graph_evaluate_policies)],
+            )
+            return graph_state.get("hits", [])
+        return self._analyze_core(events, state)
+
+    def _graph_evaluate_policies(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        graph_state["hits"] = self._analyze_core(graph_state["events"], graph_state["state"])
+        return graph_state
+
+    def _analyze_core(
         self,
         events: List[ObservedEvent],
         state: SharedState

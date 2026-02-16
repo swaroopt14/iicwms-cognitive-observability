@@ -162,6 +162,14 @@ export interface CausalLink {
   effect: string;
   confidence: number;
   agent: string;
+  reasoning?: string;
+  easy_summary?: string;
+  recommended_actions?: string[];
+  checklist?: {
+    do_now: Array<{ owner: string; action: string }>;
+    do_next: Array<{ owner: string; action: string }>;
+    verify: Array<{ owner: string; action: string }>;
+  };
   evidence_ids: string[];
   timestamp: string;
 }
@@ -452,6 +460,63 @@ export interface WhatIfRunResponse {
   created_at: string;
 }
 
+export interface WhatIfSandboxResponse {
+  mode: 'sandbox';
+  scenario_type: string;
+  parameters: Record<string, unknown>;
+  baseline: {
+    sla_violations: number;
+    compliance_violations: number;
+    risk_index: number;
+  };
+  simulated: {
+    sla_violations: number;
+    compliance_violations: number;
+    risk_index: number;
+  };
+  impact_score: number;
+  confidence: number;
+  confidence_reason: string;
+  assumptions: string[];
+  persisted: false;
+  created_at: string;
+}
+
+export interface CompositeWhatIfSandboxResponse {
+  mode: 'sandbox';
+  simulation_type: 'COMPOSITE_CHANGE_IMPACT';
+  persisted: false;
+  parameters: {
+    latency_magnitude: number;
+    workload_multiplier: number;
+    policy_extension_minutes: number;
+    history_window_cycles: number;
+  };
+  baseline: {
+    sla_violations: number;
+    compliance_violations: number;
+    risk_index: number;
+  };
+  simulated: {
+    sla_violations: number;
+    compliance_violations: number;
+    risk_index: number;
+    projected_state: string;
+  };
+  impact_score: number;
+  confidence: number;
+  confidence_reason: string;
+  logic: {
+    equation: string;
+    wf_components: Record<string, number>;
+    cv_components: Record<string, number>;
+    risk_components: Record<string, number>;
+    normalized_terms: Record<string, number>;
+  };
+  assumptions: string[];
+  created_at: string;
+}
+
 export interface IndustryIncidentBrief {
   generated_at: string;
   cycle_id?: string | null;
@@ -486,6 +551,24 @@ export interface IndustryIncidentBrief {
     confidence?: number;
     source: string;
   };
+}
+
+export interface RunbookAction {
+  action_code: string;
+  title: string;
+  priority: string;
+  owner_team: string;
+  rationale: string;
+  evidence_ids: string[];
+  automation_possible: boolean;
+}
+
+export interface IncidentTaskResponse {
+  task_id: string;
+  provider: 'jira' | 'servicenow';
+  status: string;
+  created_at: string;
+  payload: Record<string, unknown>;
 }
 
 // ============================================
@@ -899,6 +982,62 @@ export const runWhatIfSimulation = async (
   });
 };
 
+export const runWhatIfSandbox = async (
+  scenarioType: 'LATENCY_SPIKE' | 'WORKLOAD_SURGE' | 'COMPLIANCE_RELAX',
+  parameters: Record<string, unknown>
+): Promise<WhatIfSandboxResponse> => {
+  return tryApi(async () => {
+    const { data } = await api.post('/simulation/what-if/sandbox', {
+      scenario_type: scenarioType,
+      parameters,
+    });
+    return data as WhatIfSandboxResponse;
+  }, {
+    mode: 'sandbox',
+    scenario_type: scenarioType,
+    parameters,
+    baseline: { sla_violations: 2, compliance_violations: 1, risk_index: 55 },
+    simulated: { sla_violations: 3, compliance_violations: 2, risk_index: 68 },
+    impact_score: 41,
+    confidence: 0.7,
+    confidence_reason: 'Mock fallback sandbox output',
+    assumptions: ['Backend unavailable; using fallback sandbox'],
+    persisted: false,
+    created_at: new Date().toISOString(),
+  });
+};
+
+export const runCompositeWhatIfSandbox = async (request: {
+  latency_magnitude: number;
+  workload_multiplier: number;
+  policy_extension_minutes: number;
+  history_window_cycles: number;
+}): Promise<CompositeWhatIfSandboxResponse> => {
+  return tryApi(async () => {
+    const { data } = await api.post('/simulation/what-if/sandbox/composite', request);
+    return data as CompositeWhatIfSandboxResponse;
+  }, {
+    mode: 'sandbox',
+    simulation_type: 'COMPOSITE_CHANGE_IMPACT',
+    persisted: false,
+    parameters: request,
+    baseline: { sla_violations: 1.2, compliance_violations: 0.7, risk_index: 34 },
+    simulated: { sla_violations: 5.3, compliance_violations: 3.1, risk_index: 73, projected_state: 'VIOLATION' },
+    impact_score: 64,
+    confidence: 0.82,
+    confidence_reason: 'Fallback composite output',
+    logic: {
+      equation: 'Impact=100*(0.4*WF_norm + 0.35*CV_norm + 0.25*RISK_norm)',
+      wf_components: { latency_component: 2.1, workload_component: 3.6, policy_component: 0.6 },
+      cv_components: { policy_component: 1.8, workload_component: 0.8, latency_component: 0.4 },
+      risk_components: { latency_component: 9.8, workload_component: 12.0, policy_component: 6.0 },
+      normalized_terms: { WF_norm: 0.5, CV_norm: 0.45, RISK_norm: 0.62 },
+    },
+    assumptions: ['Fallback'],
+    created_at: new Date().toISOString(),
+  });
+};
+
 export const fetchIndustryIncidentBrief = async (): Promise<IndustryIncidentBrief> => {
   return tryApi(async () => {
     const { data } = await api.get('/industry/incident-brief');
@@ -913,6 +1052,47 @@ export const fetchIndustryIncidentBrief = async (): Promise<IndustryIncidentBrie
     policy_exposure: { total_policy_hits: 2, top_policies: [{ policy_id: 'NO_AFTER_HOURS_WRITE', hits: 1 }] },
     business_impact: { estimated_revenue_impact_inr: 85620, cart_abandon_rate: 14.7, impact_source: 'mock' },
     top_recommendation: { action: 'Throttle concurrent deploy jobs on vmapi01.', urgency: 'HIGH', confidence: 0.88, source: 'REC_RES_CPU_01' },
+  });
+};
+
+export const fetchRunbookActions = async (cycleId?: string): Promise<{ cycle_id: string | null; actions: RunbookAction[] }> => {
+  return tryApi(async () => {
+    const { data } = await api.get('/runbook/actions', { params: cycleId ? { cycle_id: cycleId } : undefined });
+    return data as { cycle_id: string | null; actions: RunbookAction[] };
+  }, {
+    cycle_id: cycleId || null,
+    actions: [
+      {
+        action_code: 'THROTTLE_DEPLOYS',
+        title: 'Throttle concurrent deploy jobs on vmapi01.',
+        priority: 'P1',
+        owner_team: 'devops',
+        rationale: 'CPU saturation detected during deployment window.',
+        evidence_ids: ['anom_001', 'evt_042'],
+        automation_possible: true,
+      },
+    ],
+  });
+};
+
+export const createIncidentTask = async (request: {
+  provider: 'jira' | 'servicenow';
+  title: string;
+  description: string;
+  priority?: 'P1' | 'P2' | 'P3' | 'P4';
+  action_code?: string;
+  cycle_id?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<IncidentTaskResponse> => {
+  return tryApi(async () => {
+    const { data } = await api.post('/incident/tasks/create', request);
+    return data as IncidentTaskResponse;
+  }, {
+    task_id: `task_mock_${Date.now()}`,
+    provider: request.provider,
+    status: 'created',
+    created_at: new Date().toISOString(),
+    payload: { mock: true, ...request },
   });
 };
 
