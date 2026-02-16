@@ -14,6 +14,7 @@ import {
   ArrowRight,
   Camera,
   Download,
+  Network,
   Activity,
   TrendingUp,
   Clock,
