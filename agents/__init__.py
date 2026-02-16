@@ -27,6 +27,9 @@ from .query_agent import QueryAgent
 from .adaptive_baseline_agent import AdaptiveBaselineAgent
 from .scenario_injection_agent import ScenarioInjectionAgent
 from .code_agent import CodeAgent
+from .severity_engine_agent import SeverityEngineAgent
+from .what_if_simulator_agent import WhatIfSimulatorAgent
+from .recommendation_engine_agent import RecommendationEngineAgent
 from .master_agent import MasterAgent, CycleResult
 
 __all__ = [
@@ -39,6 +42,9 @@ __all__ = [
     "AdaptiveBaselineAgent",
     "ScenarioInjectionAgent",
     "CodeAgent",
+    "SeverityEngineAgent",
+    "WhatIfSimulatorAgent",
+    "RecommendationEngineAgent",
     "MasterAgent",
     "CycleResult",
 ]

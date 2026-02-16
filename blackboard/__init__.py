@@ -14,6 +14,9 @@ from .state import (
     Hypothesis,
     CausalLink,
     Recommendation,
+    SeverityScore,
+    ScenarioRun,
+    RecommendationV2,
     get_shared_state
 )
 
@@ -28,5 +31,8 @@ __all__ = [
     "Hypothesis",
     "CausalLink",
     "Recommendation",
+    "SeverityScore",
+    "ScenarioRun",
+    "RecommendationV2",
     "get_shared_state"
 ]

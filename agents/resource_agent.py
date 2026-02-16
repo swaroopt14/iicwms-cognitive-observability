@@ -16,7 +16,7 @@ IMPORTANT:
 """
 
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
 import statistics
@@ -143,7 +143,7 @@ class ResourceAgent:
         history: ResourceHistory,
         config: Dict,
         state: SharedState
-    ) -> Anomaly | None:
+    ) -> Optional[Anomaly]:
         """
         Check for sustained spike (NOT single spike).
         
@@ -186,7 +186,7 @@ class ResourceAgent:
         history: ResourceHistory,
         config: Dict,
         state: SharedState
-    ) -> Anomaly | None:
+    ) -> Optional[Anomaly]:
         """
         Check for drift trend (consistent upward movement).
         

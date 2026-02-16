@@ -32,7 +32,13 @@ from pydantic import BaseModel, Field
 from simulator.engine import SimulationEngine, Event, ResourceMetric
 from observation import ObservationLayer, get_observation_layer
 from blackboard import SharedState, get_shared_state, RiskState
-from agents import MasterAgent, CycleResult, QueryAgent, ScenarioInjectionAgent
+from agents import (
+    MasterAgent,
+    CycleResult,
+    QueryAgent,
+    ScenarioInjectionAgent,
+    WhatIfSimulatorAgent,
+)
 from explanation import ExplanationEngine, Insight
 from guards import run_all_guards_check, SimulationContext
 from rag import get_rag_engine
@@ -292,6 +298,7 @@ _explanation: Optional[ExplanationEngine] = None
 _insights: List[Insight] = []
 _cycle_results: List[CycleResult] = []
 _slack_notifier: Optional[SlackNotifier] = None
+_what_if_agent: Optional[WhatIfSimulatorAgent] = None
 _running = False
 _reasoning_task: Optional[asyncio.Task] = None
 _startup_time: Optional[datetime] = None
@@ -463,7 +470,7 @@ async def lifespan(app: FastAPI):
     2. Cancel background task
     3. Wait for clean exit
     """
-    global _simulation, _observation, _state, _master, _explanation, _slack_notifier
+    global _simulation, _observation, _state, _master, _explanation, _slack_notifier, _what_if_agent
     global _running, _reasoning_task, _startup_time
 
     _startup_time = datetime.utcnow()
@@ -486,6 +493,7 @@ async def lifespan(app: FastAPI):
     _observation = get_observation_layer()
     _state = get_shared_state()
     _master = MasterAgent(_observation, _state)
+    _what_if_agent = WhatIfSimulatorAgent()
     _explanation = ExplanationEngine(use_llm=settings.ENABLE_CREWAI)
     _slack_notifier = SlackNotifier(
         SlackConfig(
@@ -502,6 +510,7 @@ async def lifespan(app: FastAPI):
     logger.info("  Observation Layer ......... ready")
     logger.info("  Shared State (Blackboard) . ready")
     logger.info("  MCP (Master Agent) ........ ready")
+    logger.info("  What-If Simulator ......... ready")
     logger.info("  Explanation Engine ........ ready")
     logger.info(
         "  Slack Alerts .............. %s",
@@ -2194,6 +2203,136 @@ async def trigger_analysis_cycle():
     }
 
 
+class WhatIfRequest(BaseModel):
+    scenario_type: str = Field(..., min_length=1, max_length=64)
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/simulation/what-if", tags=["Simulation"])
+async def run_what_if_simulation(request: WhatIfRequest):
+    """
+    Run a deterministic counterfactual simulation and persist the result to blackboard.
+    """
+    if _what_if_agent is None:
+        raise HTTPException(status_code=503, detail="What-if simulator is not initialized")
+    run = _what_if_agent.run(
+        scenario_type=request.scenario_type,
+        parameters=request.parameters,
+        state=_state,
+    )
+    return {
+        "scenario_id": run.scenario_id,
+        "scenario_type": run.scenario_type,
+        "parameters": run.parameters,
+        "baseline": run.baseline,
+        "simulated": run.simulated,
+        "impact_score": run.impact_score,
+        "confidence": run.confidence,
+        "confidence_reason": run.confidence_reason,
+        "assumptions": run.assumptions,
+        "related_cycle_id": run.related_cycle_id,
+        "created_at": run.created_at.isoformat(),
+    }
+
+
+@app.get("/simulation/runs", tags=["Simulation"])
+async def list_simulation_runs(limit: int = Query(default=20, ge=1, le=200)):
+    runs = []
+    for cycle in reversed(_state._completed_cycles):
+        for run in cycle.scenario_runs:
+            runs.append({
+                "scenario_id": run.scenario_id,
+                "scenario_type": run.scenario_type,
+                "parameters": run.parameters,
+                "impact_score": run.impact_score,
+                "confidence": run.confidence,
+                "related_cycle_id": run.related_cycle_id,
+                "created_at": run.created_at.isoformat(),
+            })
+            if len(runs) >= limit:
+                return {"runs": runs, "total": len(runs)}
+    return {"runs": runs, "total": len(runs)}
+
+
+@app.get("/severity/latest", tags=["Risk"])
+async def get_latest_severity(limit: int = Query(default=50, ge=1, le=500)):
+    scores = []
+    for cycle in reversed(_state._completed_cycles):
+        for s in cycle.severity_scores:
+            scores.append({
+                "severity_id": s.severity_id,
+                "cycle_id": cycle.cycle_id,
+                "source_type": s.source_type,
+                "source_id": s.source_id,
+                "issue_type": s.issue_type,
+                "base_score": s.base_score,
+                "final_score": s.final_score,
+                "label": s.label,
+                "vector": s.vector,
+                "escalation_state": s.escalation_state,
+                "context_factors": s.context_factors,
+                "evidence_ids": s.evidence_ids,
+                "timestamp": s.timestamp.isoformat(),
+            })
+            if len(scores) >= limit:
+                return {"severity_scores": scores, "total": len(scores)}
+    return {"severity_scores": scores, "total": len(scores)}
+
+
+@app.get("/severity/by-cycle/{cycle_id}", tags=["Risk"])
+async def get_severity_by_cycle(cycle_id: str):
+    cycle = next((c for c in _state._completed_cycles if c.cycle_id == cycle_id), None)
+    if not cycle:
+        raise HTTPException(status_code=404, detail=f"Cycle not found: {cycle_id}")
+    return {
+        "cycle_id": cycle_id,
+        "severity_scores": [
+            {
+                "severity_id": s.severity_id,
+                "source_type": s.source_type,
+                "source_id": s.source_id,
+                "issue_type": s.issue_type,
+                "base_score": s.base_score,
+                "final_score": s.final_score,
+                "label": s.label,
+                "vector": s.vector,
+                "escalation_state": s.escalation_state,
+                "context_factors": s.context_factors,
+                "evidence_ids": s.evidence_ids,
+                "timestamp": s.timestamp.isoformat(),
+            }
+            for s in cycle.severity_scores
+        ],
+    }
+
+
+@app.get("/recommendations/latest", tags=["Insights"])
+async def get_latest_recommendations(limit: int = Query(default=50, ge=1, le=500)):
+    recs = []
+    for cycle in reversed(_state._completed_cycles):
+        for r in cycle.recommendations_v2:
+            recs.append({
+                "rec_id": r.rec_id,
+                "cycle_id": cycle.cycle_id,
+                "issue_type": r.issue_type,
+                "entity": r.entity,
+                "severity_score": r.severity_score,
+                "action_code": r.action_code,
+                "action_description": r.action_description,
+                "confidence": r.confidence,
+                "preconditions": r.preconditions,
+                "evidence_ids": r.evidence_ids,
+                "expected_effect": r.expected_effect,
+                "rationale": r.rationale,
+                "rule_id": r.rule_id,
+                "source": r.source,
+                "timestamp": r.timestamp.isoformat(),
+            })
+            if len(recs) >= limit:
+                return {"recommendations": recs, "total": len(recs)}
+    return {"recommendations": recs, "total": len(recs)}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # AGENTIC RAG - REASONING QUERY INTERFACE (CORE DIFFERENTIATOR)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2565,6 +2704,26 @@ async def get_agent_activity(limit: int = Query(default=50, ge=1, le=500)):
                 "timestamp": rec.timestamp.isoformat(),
                 "cycle_id": cycle.cycle_id,
                 "id": rec.rec_id,
+            })
+        for rec2 in cycle.recommendations_v2:
+            activity.append({
+                "type": "recommendation_v2",
+                "agent": "RecommendationEngineAgent",
+                "description": f"{rec2.action_code}: {rec2.action_description}",
+                "confidence": rec2.confidence,
+                "timestamp": rec2.timestamp.isoformat(),
+                "cycle_id": cycle.cycle_id,
+                "id": rec2.rec_id,
+            })
+        for sev in cycle.severity_scores:
+            activity.append({
+                "type": "severity",
+                "agent": "SeverityEngineAgent",
+                "description": f"{sev.issue_type} => {sev.label} ({sev.final_score})",
+                "confidence": min(1.0, max(0.0, sev.final_score / 10.0)),
+                "timestamp": sev.timestamp.isoformat(),
+                "cycle_id": cycle.cycle_id,
+                "id": sev.severity_id,
             })
 
     # Sort by timestamp, most recent first

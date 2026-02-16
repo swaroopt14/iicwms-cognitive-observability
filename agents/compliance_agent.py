@@ -19,7 +19,7 @@ OUTPUT:
 """
 
 from datetime import datetime
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable, Optional
 from dataclasses import dataclass
 
 from observation import ObservedEvent
@@ -175,7 +175,7 @@ class ComplianceAgent:
         
         return hits
     
-    def get_policy(self, policy_id: str) -> Policy | None:
+    def get_policy(self, policy_id: str) -> Optional[Policy]:
         """Get policy definition by ID."""
         return self._policies.get(policy_id)
     

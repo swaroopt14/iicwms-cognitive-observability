@@ -38,6 +38,8 @@ from .risk_forecast_agent import RiskForecastAgent
 from .causal_agent import CausalAgent
 from .adaptive_baseline_agent import AdaptiveBaselineAgent
 from .code_agent import CodeAgent
+from .severity_engine_agent import SeverityEngineAgent
+from .recommendation_engine_agent import RecommendationEngineAgent
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -195,6 +197,8 @@ class MasterAgent:
         self._causal_agent = CausalAgent()
         self._adaptive_baseline_agent = AdaptiveBaselineAgent()
         self._code_agent = CodeAgent()
+        self._severity_engine_agent = SeverityEngineAgent()
+        self._recommendation_engine_agent = RecommendationEngineAgent()
 
         # Neo4j graph client (lazy init)
         self._graph = None
@@ -331,7 +335,12 @@ class MasterAgent:
             anomalies, policy_hits, risk_signals, self._state
         )
 
-        # ── PHASE 8: SYNTHESIZE ──
+        # ── PHASE 8: CONTEXT-AWARE SEVERITY (Sequential) ──
+        severity_scores = self._severity_engine_agent.analyze(
+            anomalies, policy_hits, self._state
+        )
+
+        # ── PHASE 9: SYNTHESIZE ──
         severity_score = self._compute_severity_score(
             anomalies, policy_hits, risk_signals, causal_links
         )
@@ -339,18 +348,21 @@ class MasterAgent:
         escalation = self._detect_escalation(risk_signals)
         new_roots = self._count_new_root_causes(causal_links)
 
-        # ── PHASE 9: RECOMMEND ──
+        # ── PHASE 10: RECOMMEND ──
         recommendations = self._generate_recommendations(
             anomalies, policy_hits, causal_links, severity_score
         )
+        recommendations_v2 = self._recommendation_engine_agent.generate(
+            anomalies, policy_hits, causal_links, severity_scores, self._state
+        )
 
-        # ── PHASE 10: COMPLETE CYCLE ──
+        # ── PHASE 11: COMPLETE CYCLE ──
         cycle = self._state.complete_cycle()
 
         cycle_end = time.perf_counter()
         duration_ms = (cycle_end - cycle_start) * 1000
 
-        # ── PHASE 11: LEARN ──
+        # ── PHASE 12: LEARN ──
         diagnostics = CycleDiagnostics(
             cycle_id=cycle_id,
             timestamp=now,
@@ -359,7 +371,7 @@ class MasterAgent:
             policy_hit_count=len(policy_hits),
             risk_signal_count=len(risk_signals),
             causal_link_count=len(causal_links),
-            recommendation_count=len(recommendations),
+            recommendation_count=len(recommendations) + len(recommendations_v2),
             duration_ms=duration_ms,
             severity_score=severity_score,
             dominant_agent=dominant_agent,
@@ -368,7 +380,7 @@ class MasterAgent:
         )
         self._update_brain_state(diagnostics)
 
-        # ── PHASE 12: SYNC TO NEO4J (non-blocking) ──
+        # ── PHASE 13: SYNC TO NEO4J (non-blocking) ──
         self._sync_to_graph(anomalies, recommendations)
 
         self._total_cycles += 1
@@ -380,7 +392,7 @@ class MasterAgent:
             policy_hit_count=len(policy_hits),
             risk_signal_count=len(risk_signals),
             causal_link_count=len(causal_links),
-            recommendation_count=len(recommendations),
+            recommendation_count=len(recommendations) + len(recommendations_v2),
             duration_ms=round(duration_ms, 3),
         )
 
