@@ -199,6 +199,12 @@ export default function CompliancePage() {
   const riskTrendData = complianceTrend?.length
     ? complianceTrend.map(p => p.risk_exposure)
     : [10, 15, 15, 30, 42, 45, 50, 58, 55, 62, 60, 65];
+  const riskTrendLabels = complianceTrend?.length
+    ? complianceTrend.map((p) => {
+        const d = new Date(p.ts);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      })
+    : Array.from({ length: riskTrendData.length }, (_, i) => `T${i + 1}`);
 
   const displaySummary = summary || { policiesMonitored: 0, activeViolations: 0, silentViolations: 0, riskExposure: 0, auditReadiness: 0 };
   const displayViolations = violations?.length ? violations : [];
@@ -249,6 +255,11 @@ export default function CompliancePage() {
           height={200}
           showGrid={true}
           showDots={true}
+          showLabels={true}
+          xLabels={riskTrendLabels}
+          xAxisLabel="Time"
+          yAxisLabel="Risk Exposure (%)"
+          yFormatter={(v) => `${Math.round(v)}%`}
           animated={true}
         />
       </div>

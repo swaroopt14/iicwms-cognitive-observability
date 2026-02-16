@@ -722,9 +722,17 @@ function WhatIfTerminal({
 
       {results.length > 0 && (
         <div className="grid grid-cols-2 gap-4">
-          <div className="p-3 bg-white rounded-xl border border-[var(--color-border)]">
-            <div className="text-xs font-semibold text-[var(--color-text-muted)] uppercase mb-2">Predicted Impact Score</div>
-            <BarChart data={barData} colors={['#4f46e5', '#818cf8']} height={120} />
+            <div className="p-3 bg-white rounded-xl border border-[var(--color-border)]">
+              <div className="text-xs font-semibold text-[var(--color-text-muted)] uppercase mb-2">Predicted Impact Score</div>
+            <BarChart
+              data={barData}
+              colors={['#4f46e5', '#818cf8']}
+              height={140}
+              xLabels={['Latency', 'Workload', 'Compliance']}
+              xAxisLabel="Scenario Parameter"
+              yAxisLabel="Impact Score"
+              yFormatter={(v) => `${Math.round(v)}`}
+            />
             <div className="mt-2 text-[11px] text-[var(--color-text-muted)]">Bars: Latency, Workload, Compliance</div>
           </div>
           <div className="space-y-2">

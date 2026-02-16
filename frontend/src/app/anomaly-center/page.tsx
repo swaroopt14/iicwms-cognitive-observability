@@ -282,8 +282,11 @@ function AnomalyDetailModal({
 }) {
   const config = severityConfig[anomaly.severity] || severityConfig.low;
 
-  // Mock trend data
-  const trendData = Array.from({ length: 8 }, () => 40 + Math.random() * 40);
+  // Deterministic trend data (render-safe, no random in component body)
+  const base = Math.max(20, Math.min(90, Math.round(anomaly.confidence * 100)));
+  const trendData = Array.from({ length: 8 }, (_, i) =>
+    Math.max(0, Math.min(100, base - 10 + i * 2 + (i % 2 === 0 ? 3 : -2)))
+  );
 
   return (
     <>
@@ -552,10 +555,14 @@ export default function AnomalyCenterPage() {
             <BarChart
               data={severityData}
               colors={['#ef4444', '#f97316', '#f59e0b', '#3b82f6']}
-              height={140}
+              height={170}
               showGrid={false}
               barRadius={6}
               animated={true}
+              xLabels={['Critical', 'High', 'Medium', 'Low']}
+              xAxisLabel="Severity Level"
+              yAxisLabel="Anomaly Count"
+              yFormatter={(v) => `${Math.round(v)}`}
             />
             <div className="flex items-center justify-center gap-4 mt-4">
               <div className="flex items-center gap-1.5 text-xs">
