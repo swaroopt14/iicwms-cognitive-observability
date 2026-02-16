@@ -5,7 +5,6 @@ import {
   Search,
   Sparkles,
   Send,
-  Info,
   ExternalLink,
   ChevronRight,
   ChevronDown,
@@ -20,19 +19,21 @@ import {
   DollarSign,
   Network,
   User,
-  Bot,
   RotateCcw,
   Copy,
   Check,
   Plus,
 } from 'lucide-react';
 import { DonutChart } from '@/components/Charts';
+import { BarChart } from '@/components/Charts';
 import {
   queryChronosAI,
-  type SearchRAGEvidence as RAGEvidence,
+  runWhatIfSimulation,
+  fetchIndustryIncidentBrief,
   type SearchCausalStep as CausalStep,
-  type SearchRecommendedAction as RecommendedAction,
   type SearchRAGResponse as RAGResponse,
+  type WhatIfRunResponse,
+  type IndustryIncidentBrief,
 } from '@/lib/api';
 
 // ============================================
@@ -45,6 +46,12 @@ interface ChatMessage {
   content: string;
   response?: RAGResponse;
   timestamp: string;
+}
+
+interface SimulationResult {
+  label: string;
+  scenarioType: 'LATENCY_SPIKE' | 'WORKLOAD_SURGE' | 'COMPLIANCE_RELAX';
+  result: WhatIfRunResponse;
 }
 
 // ============================================
@@ -584,6 +591,137 @@ function WelcomeScreen({ onSelectQuery }: { onSelectQuery: (q: string) => void }
   );
 }
 
+function WhatIfTerminal({
+  visible,
+  onAsk,
+}: {
+  visible: boolean;
+  onAsk: (q: string) => void;
+}) {
+  const [latencyMagnitude, setLatencyMagnitude] = useState(0.7);
+  const [workloadMultiplier, setWorkloadMultiplier] = useState(2.3);
+  const [policyExtension, setPolicyExtension] = useState(180);
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState<SimulationResult[]>([]);
+  const [incidentBrief, setIncidentBrief] = useState<IndustryIncidentBrief | null>(null);
+
+  if (!visible) return null;
+
+  const runSimulation = async () => {
+    setRunning(true);
+    try {
+      const [lat, load, comp] = await Promise.all([
+        runWhatIfSimulation('LATENCY_SPIKE', { magnitude: latencyMagnitude, duration_minutes: 15 }),
+        runWhatIfSimulation('WORKLOAD_SURGE', { multiplier: workloadMultiplier, duration_minutes: 15 }),
+        runWhatIfSimulation('COMPLIANCE_RELAX', { minutes_extension: policyExtension, duration_minutes: 30 }),
+      ]);
+      setResults([
+        { label: 'Latency Spike', scenarioType: 'LATENCY_SPIKE', result: lat },
+        { label: 'Workload Surge', scenarioType: 'WORKLOAD_SURGE', result: load },
+        { label: 'Compliance Relax', scenarioType: 'COMPLIANCE_RELAX', result: comp },
+      ]);
+      const brief = await fetchIndustryIncidentBrief();
+      setIncidentBrief(brief);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const barData = results.map((r) => Math.round(r.result.impact_score));
+
+  return (
+    <div className="max-w-4xl mx-auto mb-5 p-4 border border-indigo-200 rounded-2xl bg-gradient-to-r from-indigo-50 to-violet-50">
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <div className="text-sm font-bold text-[var(--color-text-primary)]">Ask Chronos Terminal · Paytm Hotfix Fail</div>
+          <div className="text-[11px] text-[var(--color-text-muted)]">Source: `paytm_hotfix_fail.jsonl` · Structured What-If simulation</div>
+        </div>
+        <button onClick={runSimulation} disabled={running} className="btn btn-primary text-xs">
+          {running ? 'Simulating...' : 'Run Simulation'}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <label className="text-xs">
+          <div className="mb-1 font-semibold text-[var(--color-text-secondary)]">Latency Magnitude (0.1-1.5)</div>
+          <input type="number" min={0.1} max={1.5} step={0.1} value={latencyMagnitude} onChange={(e) => setLatencyMagnitude(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-white" />
+        </label>
+        <label className="text-xs">
+          <div className="mb-1 font-semibold text-[var(--color-text-secondary)]">Workload Multiplier (1-5)</div>
+          <input type="number" min={1} max={5} step={0.1} value={workloadMultiplier} onChange={(e) => setWorkloadMultiplier(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-white" />
+        </label>
+        <label className="text-xs">
+          <div className="mb-1 font-semibold text-[var(--color-text-secondary)]">Policy Extension (minutes)</div>
+          <input type="number" min={30} max={600} step={15} value={policyExtension} onChange={(e) => setPolicyExtension(Number(e.target.value))} className="w-full px-2 py-1.5 rounded-lg border border-[var(--color-border)] bg-white" />
+        </label>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3">
+        <button className="btn btn-secondary text-xs" onClick={() => onAsk('Summarize Paytm hotfix failure with causal chain and top remediation')}>
+          Ask RCA
+        </button>
+        <button className="btn btn-secondary text-xs" onClick={() => onAsk('What is predicted business impact and risk trajectory for this hotfix scenario?')}>
+          Ask Impact
+        </button>
+      </div>
+
+      {results.length > 0 && (
+        <div className="grid grid-cols-2 gap-4">
+          <div className="p-3 bg-white rounded-xl border border-[var(--color-border)]">
+            <div className="text-xs font-semibold text-[var(--color-text-muted)] uppercase mb-2">Predicted Impact Score</div>
+            <BarChart data={barData} colors={['#4f46e5', '#818cf8']} height={120} />
+            <div className="mt-2 text-[11px] text-[var(--color-text-muted)]">Bars: Latency, Workload, Compliance</div>
+          </div>
+          <div className="space-y-2">
+            {results.map((r) => (
+              <div key={r.scenarioType} className="p-3 bg-white rounded-xl border border-[var(--color-border)]">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold text-[var(--color-text-primary)]">{r.label}</div>
+                  <div className="text-xs font-bold text-indigo-600">Impact {Math.round(r.result.impact_score)}</div>
+                </div>
+                <div className="text-[11px] text-[var(--color-text-muted)] mt-1">
+                  Risk: {Math.round(r.result.baseline.risk_index)} → {Math.round(r.result.simulated.risk_index)} ·
+                  Confidence: {Math.round(r.result.confidence * 100)}%
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {incidentBrief && (
+        <div className="mt-3 p-3 bg-white rounded-xl border border-[var(--color-border)]">
+          <div className="text-xs font-semibold text-[var(--color-text-muted)] uppercase mb-2">Industry Incident Brief</div>
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <div className="font-semibold text-[var(--color-text-secondary)]">Change Correlation</div>
+              <div className="text-[var(--color-text-primary)]">
+                {incidentBrief.top_change.change_type} · PR #{incidentBrief.top_change.pr_number || 'n/a'}
+              </div>
+              <div className="text-[var(--color-text-muted)]">{incidentBrief.top_change.repository || 'unknown repo'}</div>
+            </div>
+            <div>
+              <div className="font-semibold text-[var(--color-text-secondary)]">Risk + Business Impact</div>
+              <div className="text-[var(--color-text-primary)]">
+                {incidentBrief.risk_state} ({Math.round(incidentBrief.risk_score)})
+              </div>
+              <div className="text-[var(--color-text-muted)]">
+                INR {Math.round(incidentBrief.business_impact.estimated_revenue_impact_inr).toLocaleString()}
+              </div>
+            </div>
+            <div className="col-span-2">
+              <div className="font-semibold text-[var(--color-text-secondary)]">Top Action</div>
+              <div className="text-[var(--color-text-primary)]">
+                {incidentBrief.top_recommendation.action} ({incidentBrief.top_recommendation.urgency})
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================
 // Main Page
 // ============================================
@@ -603,6 +741,8 @@ function SearchPageContent() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const thinkingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const scenarioFromRoute = params.get('scenario');
+  const showPaytmTerminal = scenarioFromRoute === 'PAYTM_HOTFIX_FAIL';
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -703,6 +843,7 @@ function SearchPageContent() {
 
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto px-1 py-6">
+        <WhatIfTerminal visible={showPaytmTerminal} onAsk={(q) => handleSend(q)} />
         {messages.length === 0 && !isLoading ? (
           <WelcomeScreen onSelectQuery={(q) => handleSend(q)} />
         ) : (

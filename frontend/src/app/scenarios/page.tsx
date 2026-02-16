@@ -174,11 +174,13 @@ function ScenarioCard({
   scenario,
   onInject,
   onViewDetail,
+  onOpenTerminal,
   isRunning,
 }: {
   scenario: Scenario;
   onInject: () => void;
   onViewDetail: () => void;
+  onOpenTerminal: () => void;
   isRunning: boolean;
 }) {
   const sevColor = severityColors[scenario.severity];
@@ -249,6 +251,9 @@ function ScenarioCard({
         </button>
         <button onClick={onViewDetail} className="btn btn-secondary px-3" title="View Details">
           <Eye className="w-4 h-4" />
+        </button>
+        <button onClick={onOpenTerminal} className="btn btn-secondary px-3" title="Open Ask Chronos Terminal">
+          <Network className="w-4 h-4" />
         </button>
       </div>
     </div>
@@ -778,6 +783,9 @@ export default function ScenariosPage() {
       }, ...prev]);
     }
     setRunningScenario(null);
+    if (scenarioId === 'PAYTM_HOTFIX_FAIL') {
+      router.push(`/search?scenario=${encodeURIComponent(scenarioId)}&source=paytm_hotfix_fail.jsonl`);
+    }
   };
 
   const handleRunCycle = async () => {
@@ -887,6 +895,9 @@ export default function ScenariosPage() {
               scenario={s}
               onInject={() => handleInject(s.id)}
               onViewDetail={() => setSelectedScenario(s)}
+              onOpenTerminal={() =>
+                router.push(`/search?scenario=${encodeURIComponent(s.id)}&source=paytm_hotfix_fail.jsonl`)
+              }
               isRunning={runningScenario === s.id}
             />
           ))}

@@ -21,11 +21,13 @@ SCENARIOS:
 5. RESOURCE_DRIFT   — Gradual resource degradation over time
 """
 
+import json
 import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field, asdict
 from enum import Enum
+from pathlib import Path
 
 from simulator.engine import Event, ResourceMetric, EventType
 from observation import ObservationLayer, get_observation_layer
@@ -37,6 +39,7 @@ class ScenarioType(Enum):
     WORKLOAD_SURGE = "WORKLOAD_SURGE"
     CASCADING_FAILURE = "CASCADING_FAILURE"
     RESOURCE_DRIFT = "RESOURCE_DRIFT"
+    PAYTM_HOTFIX_FAIL = "PAYTM_HOTFIX_FAIL"
 
 
 @dataclass
@@ -158,6 +161,28 @@ SCENARIOS: Dict[ScenarioType, ScenarioDefinition] = {
         metrics_to_inject=15,
         estimated_detection_time="3–5 cycles",
     ),
+    ScenarioType.PAYTM_HOTFIX_FAIL: ScenarioDefinition(
+        scenario_type=ScenarioType.PAYTM_HOTFIX_FAIL,
+        name="Paytm Payment Hotfix Fail",
+        description=(
+            "GitHub PR merge + CI success followed by deploy-time regex regression, "
+            "CPU saturation, workflow SLA breach, compliance hit, and incident escalation."
+        ),
+        severity="critical",
+        expected_agent_response=[
+            "CodeAgent",
+            "WorkflowAgent",
+            "ResourceAgent",
+            "ComplianceAgent",
+            "RiskForecastAgent",
+            "CausalAgent",
+            "SeverityEngineAgent",
+            "RecommendationEngineAgent",
+        ],
+        events_to_inject=18,
+        metrics_to_inject=7,
+        estimated_detection_time="1–2 cycles",
+    ),
 }
 
 
@@ -236,6 +261,8 @@ class ScenarioInjectionAgent:
             execution = self._inject_cascading_failure(execution, now)
         elif scenario_type == ScenarioType.RESOURCE_DRIFT:
             execution = self._inject_resource_drift(execution, now)
+        elif scenario_type == ScenarioType.PAYTM_HOTFIX_FAIL:
+            execution = self._inject_paytm_hotfix_fail(execution)
 
         execution.status = "completed"
         execution.completed_at = datetime.utcnow().isoformat()
@@ -489,3 +516,200 @@ class ScenarioInjectionAgent:
             "showing advantage of adaptive detection."
         )
         return execution
+
+    def _inject_paytm_hotfix_fail(self, execution: ScenarioExecution) -> ScenarioExecution:
+        """
+        Replay predefined Paytm hotfix failure JSONL dataset.
+        """
+        file_path = Path("scenarios/paytm_hotfix_fail.jsonl")
+        if not file_path.exists():
+            raise ValueError(f"Scenario file not found: {file_path}")
+
+        with open(file_path, "r", encoding="utf-8") as fh:
+            for idx, line in enumerate(fh):
+                raw = line.strip()
+                if not raw:
+                    continue
+                rec = json.loads(raw)
+                ts = self._parse_ts(rec.get("timestamp"))
+                source = str(rec.get("source", "unknown")).lower()
+
+                if source == "prometheus":
+                    metric_name = str(rec.get("metric", "unknown"))
+                    mapped_metric = self._map_metric(metric_name)
+                    metric_value = float(rec.get("value", 0.0))
+                    resource_id = self._extract_resource_id(rec)
+                    self._observation.observe_metric({
+                        "resource_id": resource_id,
+                        "metric": mapped_metric,
+                        "value": metric_value if mapped_metric != "network_latency_ms" else metric_value * 1000.0,
+                        "timestamp": ts.isoformat(),
+                    })
+                    execution.metrics_injected += 1
+                    continue
+
+                if source == "github":
+                    event = self._to_github_observed_event(rec, idx, ts)
+                else:
+                    event = self._to_generic_observed_event(rec, idx, ts)
+                self._observation.observe_event(event)
+                execution.events_injected += 1
+
+        execution.system_response_summary = (
+            "Replayed paytm_hotfix_fail.jsonl (25 records): PR merge + CI success "
+            "followed by regex-induced CPU saturation, workflow timeout, policy hit, "
+            "risk escalation, and recommendation path."
+        )
+        return execution
+
+    def _parse_ts(self, ts: Optional[str]) -> datetime:
+        if not ts:
+            return datetime.utcnow()
+        normalized = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+
+    def _map_metric(self, metric_name: str) -> str:
+        mapping = {
+            "node_cpu_usage_percent": "cpu_percent",
+            "node_memory_usage_percent": "memory_percent",
+            "http_request_duration_seconds_p95": "network_latency_ms",
+            "deploy_concurrency_active": "cpu_percent",
+        }
+        return mapping.get(metric_name, metric_name)
+
+    def _extract_resource_id(self, rec: Dict[str, Any]) -> str:
+        host = rec.get("host")
+        labels = rec.get("labels", {}) if isinstance(rec.get("labels"), dict) else {}
+        if host:
+            return str(host).split(".")[0]
+        if "instance" in labels:
+            return str(labels["instance"])
+        service = rec.get("service")
+        return str(service or "svc_unknown")
+
+    def _to_github_observed_event(self, rec: Dict[str, Any], idx: int, ts: datetime) -> Dict[str, Any]:
+        event_type = str(rec.get("event_type", "github_event")).lower()
+        action = str(rec.get("action", "")).lower() or "unknown"
+        event_id = f"scenario_paytm_gh_{idx:03d}"
+        deployment_id = "deploy_paytm_hotfix_847"
+        workflow_id = "wf_deployment_paytm_847"
+        repo = str(rec.get("repository", "paytm/payment-api"))
+
+        if event_type == "pull_request":
+            mapped_type = f"PR_{action.upper()}"
+            payload = {
+                "pull_request": {
+                    "number": rec.get("pr_number"),
+                    "title": f"PR #{rec.get('pr_number')} payment hotfix",
+                    "changed_files": rec.get("files_changed", 0),
+                    "additions": rec.get("files_changed", 0),
+                    "deletions": 0,
+                    "files": ["payment_regex.py"],
+                },
+                "metadata": {
+                    "churn_lines": rec.get("files_changed", 0),
+                    "test_coverage": rec.get("test_coverage", 62),
+                    "complexity": 8.2,
+                    "hotspot_files": ["payment_regex.py"],
+                },
+            }
+        else:
+            mapped_type = f"CI_{action.upper()}"
+            payload = {
+                "workflow_run": {
+                    "name": rec.get("workflow_name", "ci-cd-deploy"),
+                    "conclusion": rec.get("conclusion", "success"),
+                    "status": rec.get("status", "success"),
+                },
+                "metadata": {"test_coverage": rec.get("test_coverage", 62)},
+            }
+
+        return {
+            "event_id": event_id,
+            "type": mapped_type,
+            "workflow_id": workflow_id,
+            "actor": str(rec.get("merged_by", "github-actions[bot]")),
+            "resource": "payment-api",
+            "timestamp": ts.isoformat(),
+            "metadata": {
+                "source_signature": {"tool_name": "github", "tool_type": "webhook", "source_host": "github.com"},
+                "enterprise_context": {
+                    "organization_id": "org_paytm",
+                    "project_id": "proj_payment_gateway",
+                    "environment": "production",
+                    "service_name": "payment-api",
+                    "deployment_id": deployment_id,
+                    "workflow_id": workflow_id,
+                },
+                "github": {
+                    "event": event_type,
+                    "action": action,
+                    "repo": repo,
+                    "deployment_id": deployment_id,
+                },
+                "event_payload": payload,
+            },
+        }
+
+    def _to_generic_observed_event(self, rec: Dict[str, Any], idx: int, ts: datetime) -> Dict[str, Any]:
+        message = str(rec.get("message", ""))
+        service = str(rec.get("service", "unknown_service"))
+        event_id = f"scenario_paytm_evt_{idx:03d}"
+        workflow_id = rec.get("workflow_id")
+        actor = str(rec.get("actor", "svc_deploy_bot"))
+        resource = str(rec.get("host", service))
+        event_type = "CONFIG_CHANGE"
+
+        # Map to workflow events where possible to trigger WorkflowAgent.
+        if "workflow" in service or workflow_id:
+            workflow_id = str(workflow_id or "wf_deployment_paytm_847")
+            if "timeout" in message.lower():
+                event_type = "WORKFLOW_STEP_COMPLETE"
+            elif "failed" in message.lower():
+                event_type = "WORKFLOW_STEP_SKIP"
+            else:
+                event_type = "WORKFLOW_STEP_START"
+
+        # Map compliance signal.
+        if "compliance violation" in message.lower():
+            event_type = EventType.ACCESS_WRITE.value
+            actor = "svc_deploy_bot"
+            resource = "pg_prod_customers"
+            workflow_id = None
+
+        metadata: Dict[str, Any] = {
+            "source": rec.get("source"),
+            "level": rec.get("level"),
+            "raw": rec,
+        }
+
+        if event_type == "WORKFLOW_STEP_COMPLETE":
+            raw_step = str(rec.get("step", "production"))
+            valid_steps = {"build", "test", "staging", "approval", "production", "complete"}
+            step_name = raw_step if raw_step in valid_steps else "production"
+            duration_seconds = int(float(rec.get("duration_ms", 180000)) / 1000)
+            # Ensure SLA breach for wf_deployment when replaying timeout-style records.
+            if duration_seconds <= 120:
+                duration_seconds = 180
+            metadata.update({
+                "step": step_name,
+                "step_index": 3,
+                "duration_seconds": duration_seconds,
+            })
+        elif event_type == "WORKFLOW_STEP_SKIP":
+            metadata.update({
+                "skipped_step": "approval",
+                "reason": "hotfix_failure",
+            })
+        elif event_type == EventType.ACCESS_WRITE.value:
+            metadata.update({"location": "internal"})
+
+        return {
+            "event_id": event_id,
+            "type": event_type,
+            "workflow_id": workflow_id,
+            "actor": actor,
+            "resource": resource,
+            "timestamp": ts.isoformat(),
+            "metadata": metadata,
+        }

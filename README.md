@@ -409,6 +409,43 @@ Each service directory also contains its own `README.md` with interface contract
 
 ---
 
+
+#  Phase 1 – Foundation & Architecture
+
+### 1️⃣ Initial Project Scaffold
+
+```
+feat: initialize IICWMS Chronos AI monorepo structure
+
+- Created 10-service architecture layout
+- Added backend service directories (simulator → graph)
+- Added frontend Next.js 16 scaffold
+- Added docs/, scripts/, guards.py
+- Established modular microservice boundaries
+```
+
+---
+### 2️⃣ Architecture Documentation
+
+```
+docs: add full system architecture and service manifest
+
+- Added SERVICES.md with data flow diagrams
+- Added architecture.md and end-to-end document
+- Defined ATRE principles (Auditable, Traceable, Retryable, Explainable)
+- Documented agent boundaries and guard rules
+```
+
+Configured environment variables and FastAPI server setup
+chore(config): configure environment variables and FastAPI bootstrap
+
+- Added .env.example with service configs
+- Implemented FastAPI app factory
+- Configured Uvicorn server entrypoint
+- Added CORS and middleware setup
+- Documented local development workflow
+
+
 ## License
 
 MIT License
