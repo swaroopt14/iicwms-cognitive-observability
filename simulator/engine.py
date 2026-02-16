@@ -17,6 +17,8 @@ FORBIDDEN:
 This module creates REALITY, not alerts.
 """
 
+from __future__ import annotations
+
 import uuid
 import random
 from datetime import datetime, timedelta
