@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
+import React, { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import {
   Search,
   Sparkles,
@@ -754,7 +754,9 @@ function SearchPageContent() {
 
   // Clean up timer on unmount
   useEffect(() => {
-    return () => { if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current); };
+    return () => { 
+      if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current); 
+    };
   }, []);
 
   const handleSend = async (text?: string) => {
