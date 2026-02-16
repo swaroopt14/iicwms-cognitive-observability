@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useSearchParams } from 'next/navigation';
+import React, { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import {
   Search,
   Sparkles,
@@ -727,7 +726,14 @@ function WhatIfTerminal({
 // Main Page
 // ============================================
 export default function SearchPage() {
-  const params = useSearchParams();
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <SearchPageContent />
+    </Suspense>
+  );
+}
+
+function SearchPageContent() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -748,7 +754,9 @@ export default function SearchPage() {
 
   // Clean up timer on unmount
   useEffect(() => {
-    return () => { if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current); };
+    return () => { 
+      if (thinkingTimerRef.current) clearInterval(thinkingTimerRef.current); 
+    };
   }, []);
 
   const handleSend = async (text?: string) => {

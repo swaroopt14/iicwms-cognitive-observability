@@ -740,3 +740,8 @@ class MasterAgent:
                 for d in recent[-5:]
             ],
         }
+
+
+# Find where QueryAgent is instantiated
+query_agent = QueryAgent()
+query_agent.set_rag_engine(get_rag_engine())

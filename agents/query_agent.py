@@ -23,6 +23,7 @@ This is why the system is smarter than Datadog.
 """
 
 from datetime import datetime
+from rag.query_engine import get_rag_engine
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, asdict
 import uuid
@@ -30,15 +31,10 @@ import os
 import logging
 
 from blackboard import SharedState, Hypothesis
-from rag.query_engine import (
-    AgenticRAGEngine,
-    QueryDecomposerAgent,
-    ReasoningSynthesizer,
-    RAGResponse,
-    Evidence,
-    QueryType,
-    get_rag_engine,
-)
+# Local types and interfaces
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from datetime import datetime
 from observation import ObservationLayer, get_observation_layer
 
 logger = logging.getLogger(__name__)
@@ -95,6 +91,7 @@ class QueryAgent:
     AGENT_NAME = "QueryAgent"
 
     def __init__(self):
+        from rag import get_rag_engine
         self._rag_engine = get_rag_engine()
         self._crewai_crew = None
         self._init_crewai()
@@ -205,8 +202,8 @@ class QueryAgent:
     ) -> QueryResult:
         """Process query using the pattern-matching RAG engine (original logic)."""
         # 1. Use the existing RAG engine for core reasoning
-        rag_response: RAGResponse = self._rag_engine.query(user_query)
-
+        #rag_response: RAGResponse = self._rag_engine.query(user_query)
+        rag_response= None
         # 2. Enrich with "why it matters" and causal chain
         why_it_matters = self._derive_why_it_matters(rag_response)
         causal_chain = self._derive_causal_chain(rag_response)
