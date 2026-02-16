@@ -32,6 +32,7 @@ import {
 } from '@/lib/api';
 import { formatTime } from '@/lib/utils';
 import { AreaChart, BarChart, RiskGraph } from '@/components/Charts';
+import MetricCardWithHelp from '@/components/MetricCardWithHelp';
 
 // Insight Card Component
 function InsightCard({ insight, index }: { insight: Insight; index: number }) {
@@ -219,6 +220,7 @@ export default function OverviewPage() {
 
       {/* Stats Row */}
       <div className="grid grid-cols-4 gap-4">
+        {/* Active Workflows */}
         <div className="stats-card">
           <div className="flex items-center justify-between">
             <div>
@@ -234,6 +236,7 @@ export default function OverviewPage() {
           </div>
         </div>
 
+        {/* Total Events */}
         <div className="stats-card">
           <div className="flex items-center justify-between">
             <div>
@@ -249,35 +252,45 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        <div className="stats-card">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="stats-label">Active Anomalies</div>
-              <div className="stats-value text-[var(--color-warning)]">{overviewStats?.active_anomalies ?? health?.active_anomalies ?? 0}</div>
-            </div>
-            <div className="icon-container icon-container-md bg-amber-100">
-              <AlertTriangle className="w-5 h-5 text-amber-600" />
-            </div>
-          </div>
-          <div className="stats-trend stats-trend-down mt-3">
-            <TrendingDown className="w-3 h-3" /> {overviewStats?.total_anomalies ?? 0} total detected
-          </div>
-        </div>
+        {/* Anomaly Rate with Help */}
+        <MetricCardWithHelp
+          title="Active Anomalies"
+          value={overviewStats?.active_anomalies ?? health?.active_anomalies ?? 0}
+          trend={-5}
+          definition="Active anomalies represent unusual patterns or deviations from normal behavior detected in your workflows, resources, or system state."
+          healthyRange="0-2 concurrent anomalies"
+          currentStatus={
+            (overviewStats?.active_anomalies ?? 0) > 5 ? 'critical' : 
+            (overviewStats?.active_anomalies ?? 0) > 2 ? 'warning' : 
+            'healthy'
+          }
+          statusMessage={
+            (overviewStats?.active_anomalies ?? 0) > 5 ? 'Critical: Multiple anomalies detected' : 
+            (overviewStats?.active_anomalies ?? 0) > 2 ? 'Warning: Elevated anomaly count' : 
+            'Healthy: Normal activity'
+          }
+          color="#f59e0b"
+        />
 
-        <div className="stats-card">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="stats-label">Compliance Score</div>
-              <div className="stats-value text-[var(--color-success)]">{overviewStats?.compliance_rate ?? 0}%</div>
-            </div>
-            <div className="icon-container icon-container-md bg-emerald-100">
-              <Shield className="w-5 h-5 text-emerald-600" />
-            </div>
-          </div>
-          <div className="stats-trend stats-trend-up mt-3">
-            <TrendingUp className="w-3 h-3" /> {overviewStats?.total_violations ?? 0} violations found
-          </div>
-        </div>
+        {/* Compliance Score with Help */}
+        <MetricCardWithHelp
+          title="Compliance Score"
+          value={`${overviewStats?.compliance_rate ?? 0}%`}
+          trend={2}
+          definition="Compliance score measures adherence to security policies, regulatory requirements, and system governance rules."
+          healthyRange="Above 95%"
+          currentStatus={
+            (overviewStats?.compliance_rate ?? 0) > 95 ? 'healthy' : 
+            (overviewStats?.compliance_rate ?? 0) > 80 ? 'warning' : 
+            'critical'
+          }
+          statusMessage={
+            (overviewStats?.compliance_rate ?? 0) > 95 ? 'Excellent: All policies met' : 
+            (overviewStats?.compliance_rate ?? 0) > 80 ? 'Warning: Some violations found' : 
+            'Critical: Major violations'
+          }
+          color="#10b981"
+        />
       </div>
 
       {/* Main Grid */}

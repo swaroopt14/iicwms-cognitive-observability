@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   TrendingUp,
@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { fetchRiskIndex, type RiskDataPoint, type RiskContribution } from '@/lib/api';
 import { RiskGraph, MultiLineChart, DonutChart, Sparkline } from '@/components/Charts';
+import RiskDetailModal from '@/components/RiskDetailModal';
 
 // Risk State Colors
 const riskStateColors: Record<string, { color: string; bg: string; border: string }> = {
@@ -138,31 +139,72 @@ export default function SystemGraphPage() {
     x: number;
     y: number;
   }>({ point: null, x: 0, y: 0 });
+  
+  const [selectedPoint, setSelectedPoint] = useState<RiskDataPoint | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  const [animatingIndices, setAnimatingIndices] = useState<Set<number>>(new Set());
+  const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const [slidingWindowStart, setSlidingWindowStart] = useState(0);
+  const prevDataLengthRef = useRef(0);
+  const windowSizeRef = useRef(60); // Show last 60 data points (~2 minutes at 2-sec intervals)
+
+  // Update real-time clock every 100ms
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(new Date()), 100);
+    return () => clearInterval(timer);
+  }, []);
 
   const { data: riskData } = useQuery({
     queryKey: ['riskIndex'],
     queryFn: fetchRiskIndex,
-    refetchInterval: 10000,
+    refetchInterval: 2000, // Fetch every 2 seconds for real-time updates
   });
 
   const displayData = riskData?.history || [];
-  const currentRisk = displayData[displayData.length - 1];
-  const previousRisk = displayData[displayData.length - 2];
+  
+  // Sliding window: only show last N points and scroll older data out
+  const startIdx = Math.max(0, displayData.length - windowSizeRef.current);
+  const windowedData = displayData.slice(startIdx);
+  
+  const currentRisk = windowedData[windowedData.length - 1];
+  const previousRisk = windowedData[windowedData.length - 2];
   const trend = currentRisk && previousRisk ? currentRisk.risk_score - previousRisk.risk_score : 0;
 
-  // Data for multi-line chart
+  // Detect new data points and trigger animation
+  useEffect(() => {
+    if (displayData.length > prevDataLengthRef.current) {
+      const newIndices = new Set<number>();
+      const windowStart = Math.max(0, displayData.length - windowSizeRef.current);
+      for (let i = Math.max(prevDataLengthRef.current, windowStart); i < displayData.length; i++) {
+        newIndices.add(i - windowStart); // Index relative to windowed data
+      }
+      setAnimatingIndices(newIndices);
+      
+      // Clear animation after 600ms
+      const timer = setTimeout(() => {
+        setAnimatingIndices(new Set());
+      }, 600);
+
+      prevDataLengthRef.current = displayData.length;
+      return () => clearTimeout(timer);
+    }
+  }, [displayData.length]);
+
+  // Get state config early (before rendering)
+  const stateConfig = riskStateColors[currentRisk?.risk_state || 'NORMAL'] || riskStateColors.NORMAL;
+
+  // Data for multi-line chart (using windowed data)
   const multiLineData = [
-    { data: displayData.map(d => d.workflow_risk), color: '#3b82f6', label: 'Workflow' },
-    { data: displayData.map(d => d.resource_risk), color: '#10b981', label: 'Resource' },
-    { data: displayData.map(d => d.compliance_risk), color: '#8b5cf6', label: 'Compliance' },
+    { data: windowedData.map(d => d.workflow_risk), color: '#3b82f6', label: 'Workflow' },
+    { data: windowedData.map(d => d.resource_risk), color: '#10b981', label: 'Resource' },
+    { data: windowedData.map(d => d.compliance_risk), color: '#8b5cf6', label: 'Compliance' },
   ];
 
-  // Sparkline data for breakdown cards
-  const workflowSparkline = displayData.slice(-10).map(d => d.workflow_risk);
-  const resourceSparkline = displayData.slice(-10).map(d => d.resource_risk);
-  const complianceSparkline = displayData.slice(-10).map(d => d.compliance_risk);
-
-  const stateConfig = riskStateColors[currentRisk?.risk_state || 'NORMAL'];
+  // Sparkline data for breakdown cards (last 10 of windowed data)
+  const workflowSparkline = windowedData.slice(-10).map(d => d.workflow_risk);
+  const resourceSparkline = windowedData.slice(-10).map(d => d.resource_risk);
+  const complianceSparkline = windowedData.slice(-10).map(d => d.compliance_risk);
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -270,12 +312,28 @@ export default function SystemGraphPage() {
           </div>
         </div>
         <RiskGraph
-          data={displayData}
+          data={windowedData}
           height={300}
           showZones={true}
           onPointHover={(point, x, y) => setTooltipData({ point, x, y })}
+          onPointClick={(point) => {
+            setSelectedPoint(point);
+            setIsModalOpen(true);
+          }}
+          animatingIndices={animatingIndices}
+          showTimeLabels={true}
+          currentTime={currentTime}
+          isRealtime={true}
         />
         {tooltipData.point && <Tooltip {...tooltipData} />}
+        <RiskDetailModal
+          point={selectedPoint}
+          isOpen={isModalOpen}
+          onClose={() => {
+            setIsModalOpen(false);
+            setSelectedPoint(null);
+          }}
+        />
       </div>
 
       <div className="grid grid-cols-12 gap-6">
