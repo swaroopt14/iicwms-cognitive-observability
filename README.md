@@ -425,6 +425,17 @@ feat: initialize IICWMS Chronos AI monorepo structure
 ```
 
 ---
+### 2️⃣ Architecture Documentation
+
+```
+docs: add full system architecture and service manifest
+
+- Added SERVICES.md with data flow diagrams
+- Added architecture.md and end-to-end document
+- Defined ATRE principles (Auditable, Traceable, Retryable, Explainable)
+- Documented agent boundaries and guard rules
+```
+
 
 
 ## License
