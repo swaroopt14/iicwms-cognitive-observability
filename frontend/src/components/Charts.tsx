@@ -495,29 +495,21 @@ export function BarChart({
 // ============================================
 // Risk Index Graph Component
 // ============================================
-interface RiskGraphProps {
-  data: RiskDataPoint[];
+type RiskGraphPoint = { timestamp: string; risk_score: number };
+
+interface GenericRiskGraphProps<T extends RiskGraphPoint> {
+  data: T[];
   height?: number;
   showZones?: boolean;
-  onPointHover?: (point: RiskDataPoint | null, x: number, y: number) => void;
-  onPointClick?: (point: RiskDataPoint) => void;
-  animatingIndices?: Set<number>;
-  showTimeLabels?: boolean;
-  currentTime?: Date;
-  isRealtime?: boolean;
+  onPointHover?: (point: T | null, x: number, y: number) => void;
 }
 
-export function RiskGraph({
+export function RiskGraph<T extends RiskGraphPoint>({
   data,
   height = 200,
   showZones = true,
   onPointHover,
-  onPointClick,
-  animatingIndices = new Set(),
-  showTimeLabels = false,
-  currentTime = new Date(),
-  isRealtime = false,
-}: RiskGraphProps) {
+}: GenericRiskGraphProps<T>) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 
@@ -584,56 +576,6 @@ export function RiskGraph({
     }
     ctx.setLineDash([]);
 
-    // Draw X-axis time labels if enabled
-    if (showTimeLabels && data.length > 0) {
-      const labelCount = Math.min(5, Math.max(2, Math.floor(width / 100)));
-      
-      for (let i = 0; i <= labelCount; i++) {
-        const dataIndex = Math.floor((data.length - 1) * (i / labelCount));
-        const dataPoint = data[dataIndex];
-        if (!dataPoint) continue;
-
-        const x = padding.left + (plotWidth / (data.length - 1 || 1)) * dataIndex;
-        
-        // Format time
-        let timeStr = '';
-        
-        if (isRealtime && currentTime) {
-          // Real-time mode: calculate time backwards from current time
-          // Assuming each data point is 2 seconds apart (based on refetchInterval)
-          const pointsFromEnd = data.length - 1 - dataIndex;
-          const msAgo = pointsFromEnd * 2000; // 2 seconds per point
-          const time = new Date(currentTime.getTime() - msAgo);
-          timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        } else if (typeof dataPoint.timestamp === 'string') {
-          const date = new Date(dataPoint.timestamp);
-          timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        } else if (typeof dataPoint.timestamp === 'number') {
-          const date = new Date(dataPoint.timestamp * 1000);
-          timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        } else {
-          timeStr = `T+${dataIndex}s`;
-        }
-
-        ctx.fillStyle = '#64748b';
-        ctx.font = '10px Inter, system-ui';
-        ctx.textAlign = 'center';
-        ctx.fillText(timeStr, x, chartHeight - padding.bottom + 15);
-      }
-    }
-
-    // Draw current time indicator at top right (if real-time)
-    if (isRealtime && currentTime) {
-      const timeStr = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      ctx.fillStyle = '#10b981';
-      ctx.font = 'bold 12px Inter, system-ui';
-      ctx.textAlign = 'right';
-      ctx.shadowColor = 'rgba(16, 185, 129, 0.3)';
-      ctx.shadowBlur = 8;
-      ctx.fillText(`Now: ${timeStr}`, width - padding.right - 5, padding.top + 15);
-      ctx.shadowColor = 'transparent';
-    }
-
     if (data.length === 0) {
       ctx.fillStyle = '#94a3b8';
       ctx.font = '14px Inter, system-ui';
@@ -649,27 +591,17 @@ export function RiskGraph({
       data: d,
     }));
 
-    // Draw gradient fill with fade effect for scrolling illusion
-    const fadeGradient = isRealtime 
-      ? ctx.createLinearGradient(padding.left, 0, padding.left + 80, 0) // Fade from left in real-time mode
-      : ctx.createLinearGradient(0, padding.top, 0, chartHeight - padding.bottom);
-    
-    if (isRealtime) {
-      // Left-side fade for scrolling effect
-      fadeGradient.addColorStop(0, 'rgba(99, 102, 241, 0)');
-      fadeGradient.addColorStop(0.3, 'rgba(99, 102, 241, 0.15)');
-      fadeGradient.addColorStop(1, 'rgba(99, 102, 241, 0.2)');
-    } else {
-      fadeGradient.addColorStop(0, 'rgba(99, 102, 241, 0.2)');
-      fadeGradient.addColorStop(1, 'rgba(99, 102, 241, 0)');
-    }
+    // Draw gradient fill
+    const gradient = ctx.createLinearGradient(0, padding.top, 0, chartHeight - padding.bottom);
+    gradient.addColorStop(0, 'rgba(99, 102, 241, 0.2)');
+    gradient.addColorStop(1, 'rgba(99, 102, 241, 0)');
 
     ctx.beginPath();
     ctx.moveTo(points[0].x, chartHeight - padding.bottom);
     points.forEach((p) => ctx.lineTo(p.x, p.y));
     ctx.lineTo(points[points.length - 1].x, chartHeight - padding.bottom);
     ctx.closePath();
-    ctx.fillStyle = fadeGradient;
+    ctx.fillStyle = gradient;
     ctx.fill();
 
     // Draw line with gradient stroke
@@ -692,49 +624,52 @@ export function RiskGraph({
     // Draw points
     points.forEach((p, i) => {
       const isHovered = hoveredIndex === i;
-      const isAnimating = animatingIndices.has(i);
       const color = p.data.risk_score > 70 ? '#ef4444' : 
                     p.data.risk_score > 50 ? '#f97316' :
                     p.data.risk_score > 30 ? '#f59e0b' : '#10b981';
 
-      // Animation scale for new points (pulse effect)
-      const animationScale = isAnimating ? 1.4 : isHovered ? 1.25 : 1;
-
-      // Strong glow effect for animating/hovering points
-      if (isAnimating || isHovered) {
+      // Glow effect
+      if (isHovered) {
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 20 * animationScale, 0, Math.PI * 2);
-        ctx.fillStyle = isAnimating ? `${color}40` : `${color}20`;
+        ctx.arc(p.x, p.y, 16, 0, Math.PI * 2);
+        ctx.fillStyle = `${color}20`;
         ctx.fill();
       }
 
       // Outer ring
       ctx.beginPath();
-      ctx.arc(p.x, p.y, (isHovered ? 10 : 6) * animationScale, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, isHovered ? 10 : 6, 0, Math.PI * 2);
       ctx.fillStyle = `${color}30`;
       ctx.fill();
 
-      // Inner dot - brighter for animating points
+      // Inner dot
       ctx.beginPath();
-      ctx.arc(p.x, p.y, (isHovered ? 6 : 4) * animationScale, 0, Math.PI * 2);
-      ctx.fillStyle = isAnimating ? color : color;
+      ctx.arc(p.x, p.y, isHovered ? 6 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = color;
       ctx.fill();
       ctx.strokeStyle = 'white';
-      ctx.lineWidth = isAnimating ? 3 : 2;
+      ctx.lineWidth = 2;
       ctx.stroke();
-
-      // Add glow shadow for animating points
-      if (isAnimating) {
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 16;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 0;
-      }
     });
 
-    // Reset shadow
-    ctx.shadowColor = 'transparent';
-  }, [data, showZones, hoveredIndex, animatingIndices, showTimeLabels, currentTime, isRealtime]);
+    // X-axis time labels
+    ctx.fillStyle = '#64748b';
+    ctx.font = '10px Inter, system-ui';
+    ctx.textAlign = 'center';
+    const labelInterval = Math.max(1, Math.ceil(data.length / 6));
+    const lastTs = data.length > 0 ? new Date(data[data.length - 1].timestamp).getTime() : Date.now();
+    const timeOffsetMs = Date.now() - lastTs;
+    data.forEach((d, i) => {
+      if (i % labelInterval === 0 || i === data.length - 1) {
+        const x = padding.left + (plotWidth / (data.length - 1 || 1)) * i;
+        const adjusted = new Date(new Date(d.timestamp).getTime() + timeOffsetMs);
+        const timeLabel = i === data.length - 1
+          ? 'Now'
+          : adjusted.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        ctx.fillText(timeLabel, x, chartHeight - 8);
+      }
+    });
+  }, [data, showZones, hoveredIndex]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -766,40 +701,12 @@ export function RiskGraph({
     }
   };
 
-  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas || data.length === 0 || !onPointClick) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const padding = { left: 45, right: 20 };
-    const plotWidth = rect.width - padding.left - padding.right;
-
-    // Find closest point
-    let closestIndex = -1;
-    let closestDist = Infinity;
-
-    data.forEach((_, i) => {
-      const px = padding.left + (plotWidth / (data.length - 1 || 1)) * i;
-      const dist = Math.abs(x - px);
-      if (dist < 30 && dist < closestDist) {
-        closestDist = dist;
-        closestIndex = i;
-      }
-    });
-
-    if (closestIndex !== -1) {
-      onPointClick(data[closestIndex]);
-    }
-  };
-
   return (
     <canvas
       ref={canvasRef}
       style={{ width: '100%', height }}
       className="w-full cursor-crosshair"
       onMouseMove={handleMouseMove}
-      onClick={handleClick}
       onMouseLeave={() => {
         setHoveredIndex(null);
         onPointHover?.(null, 0, 0);

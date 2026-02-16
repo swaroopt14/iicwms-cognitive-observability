@@ -140,6 +140,7 @@ iicwms-cognitive-observability/
 ├── docs/                                # Documentation & judge-facing materials
 │   ├── IICWMS_End_To_End_Document.md    #   End-to-end system document (for judges)
 │   ├── DEMO_GUIDE_BLACK_FRIDAY.md       #   Judge-level demo narrative + Q&A + black friday flow
+│   ├── JUDGE_RISK_LOGIC_GUIDE.md        #   Risk formulas, thresholds, data categorization, mermaid flows
 │   ├── architecture.md                  #   System architecture & data model
 │   ├── agent_responsibilities.md        #   Agent I/O contracts & boundaries
 │   ├── assumptions.md                   #   Explicit assumptions & limitations

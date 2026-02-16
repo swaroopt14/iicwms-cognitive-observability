@@ -220,6 +220,8 @@ export interface RiskContribution {
   agent: string;
   contribution: number;
   reason: string;
+  signal_type?: string;
+  evidence_id?: string;
 }
 
 export interface RiskDataPoint {
@@ -237,6 +239,8 @@ export interface RiskIndexResponse {
   history: RiskDataPoint[];
   current_risk: number;
   trend: string;
+  last_updated?: string;
+  top_drivers?: RiskContribution[];
 }
 
 export interface ComplianceSummary {

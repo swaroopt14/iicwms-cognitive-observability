@@ -23,6 +23,7 @@ import logging
 import sys
 import hashlib
 import json
+import re
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -1600,6 +1601,34 @@ async def get_workflows():
         },
     }
 
+    # Only expose deployment workflows for demo clarity.
+    deployment_wfs = [
+        wf for wf in workflows.values()
+        if wf.workflow_type == "wf_deployment" or wf.workflow_id.startswith("wf_deployment")
+    ]
+
+    if not deployment_wfs:
+        # Mock 10 deployment workflows for consistent demo behavior.
+        mock_rows = []
+        for i in range(1, 11):
+            wid = f"wf_deployment_{i:02d}"
+            steps_completed = 2 + (i % 4)
+            total_steps = 6
+            mock_rows.append(WorkflowResponse(
+                id=wid,
+                name=f"Deployment Pipeline {i:02d}",
+                status="active" if i % 3 != 0 else "degraded",
+                steps_completed=steps_completed,
+                total_steps=total_steps,
+                project_id=default_context["wf_deployment"]["project_id"],
+                project_name=default_context["wf_deployment"]["project_name"],
+                environment=default_context["wf_deployment"]["environment"],
+                context_tag=default_context["wf_deployment"]["context_tag"],
+                input_source=default_context["wf_deployment"]["input_source"],
+                issue_category=default_context["wf_deployment"]["issue_category"],
+            ).model_dump())
+        return {"workflows": mock_rows}
+
     return {
         "workflows": [
             (lambda wf: (
@@ -1621,7 +1650,7 @@ async def get_workflows():
                     workflow_context.get(wf.workflow_id, {}),
                 )
             ))(wf)
-            for wf in workflows.values()
+            for wf in deployment_wfs[:10]
         ]
     }
 
@@ -2877,11 +2906,28 @@ async def get_risk_index(limit: int = Query(default=50, ge=1, le=500)):
         ]
         history_data.append(point)
     current = tracker.get_current_risk().to_dict() if tracker.get_current_risk() else None
+    current_contribs = current.get("contributions", []) if current else []
+    top_drivers = sorted(
+        [
+            {
+                "agent": c.get("agent"),
+                "contribution": c.get("impact", 0),
+                "reason": c.get("description", ""),
+                "signal_type": c.get("signal_type"),
+                "evidence_id": c.get("evidence_id"),
+            }
+            for c in current_contribs
+        ],
+        key=lambda x: x.get("contribution", 0),
+        reverse=True,
+    )[:10]
     return {
         # Frontend contract
         "history": history_data,
         "current_risk": current["risk_score"] if current else 20,
         "trend": tracker.get_trend(),
+        "last_updated": current.get("timestamp") if current else datetime.now(timezone.utc).isoformat(),
+        "top_drivers": top_drivers,
         # Backward-compatible aliases
         "data": history_data,
         "current": current,
@@ -3595,6 +3641,9 @@ async def get_compliance_summary():
 @app.get("/causal/links", tags=["Causal"])
 async def get_causal_links():
     """Get causal links from recent cycles (used by causal-analysis page)."""
+    def _extract_workflow_ids(text: str) -> List[str]:
+        return re.findall(r"wf_[a-zA-Z0-9_-]+", text or "")
+
     def _easy_actions(cause: str, effect: str) -> List[str]:
         key = f"{cause}->{effect}".upper()
         if "SUSTAINED_RESOURCE_CRITICAL->WORKFLOW_DELAY" in key:
@@ -3678,7 +3727,55 @@ async def get_causal_links():
                 "timestamp": c.timestamp.isoformat(),
                 "evidence_ids": getattr(c, "evidence", []),
             })
-    return all_links[-30:]
+    # If the causal agent only produced links for a single workflow, supplement
+    # with lightweight synthetic links for other active workflows to keep the UI dynamic.
+    workflow_ids_in_links: set[str] = set()
+    for l in all_links:
+        workflow_ids_in_links.update(_extract_workflow_ids(l.get("cause", "")))
+        workflow_ids_in_links.update(_extract_workflow_ids(l.get("effect", "")))
+
+    tracked = _master._workflow_agent.get_tracked_workflows()
+    deployment_ids = [f"wf_deployment_{i:02d}" for i in range(1, 11)]
+    tracked_ids = [wf for wf in tracked.keys() if "deployment" in wf]
+    if len(tracked_ids) < 10:
+        for wid in deployment_ids:
+            if wid not in tracked_ids:
+                tracked_ids.append(wid)
+            if len(tracked_ids) >= 10:
+                break
+    if not tracked_ids and not all_links:
+        tracked_ids = deployment_ids
+
+    for wf_id in tracked_ids:
+        if wf_id in workflow_ids_in_links:
+            continue
+        now_iso = datetime.now(timezone.utc).isoformat()
+        chain = [
+            ("RESOURCE_PRESSURE", "WORKFLOW_DELAY", 78.0),
+            ("WORKFLOW_DELAY", "RETRY_LOOP", 74.0),
+            ("RETRY_LOOP", "SLA_RISK", 70.0),
+            ("SLA_RISK", "COMPLIANCE_ALERT", 66.0),
+        ]
+        for i, (cause, effect, conf) in enumerate(chain):
+            all_links.append({
+                "link_id": f"cl_synth_{wf_id}_{i+1}",
+                "cause": f"{cause} ({wf_id})",
+                "effect": f"{effect} ({wf_id})",
+                "confidence": conf,
+                "agent": "CausalAgent",
+                "reasoning": f"Synthetic causal chain for active workflow {wf_id}.",
+                "easy_summary": f"{cause.replace('_', ' ').title()} likely led to {effect.replace('_', ' ').title()} for {wf_id}.",
+                "recommended_actions": _easy_actions(cause, effect),
+                "checklist": _checklist(cause, effect),
+                "timestamp": now_iso,
+                "evidence_ids": [],
+            })
+    # Keep only deployment workflow links and cap to 10 for mock/demo clarity.
+    deployment_only = [
+        l for l in all_links
+        if "deployment" in l.get("cause", "").lower() or "deployment" in l.get("effect", "").lower()
+    ]
+    return deployment_only[-10:]
 
 
 def _anomaly_severity(anomaly) -> str:

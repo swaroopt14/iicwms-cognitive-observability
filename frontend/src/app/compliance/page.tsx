@@ -6,25 +6,22 @@ import {
   Shield,
   AlertTriangle,
   CheckCircle,
-  XCircle,
   Info,
   ChevronRight,
   X,
   ExternalLink,
   TrendingUp,
   TrendingDown,
-  Clock,
 } from 'lucide-react';
 import {
   fetchPolicies,
   fetchPolicyViolations,
   fetchComplianceSummary,
   fetchComplianceTrend,
-  type Policy,
   type PolicyViolation,
 } from '@/lib/api';
 import { formatTime, formatDateTime } from '@/lib/utils';
-import { DonutChart, AreaChart, Sparkline } from '@/components/Charts';
+import { DonutChart, RiskGraph, Sparkline } from '@/components/Charts';
 
 // Summary Card with Donut
 function SummaryCard({
@@ -186,27 +183,29 @@ function ViolationDrawer({ violation, onClose }: { violation: PolicyViolation; o
 
 export default function CompliancePage() {
   const [selectedViolation, setSelectedViolation] = useState<PolicyViolation | null>(null);
+  const [syntheticStartMs] = useState(() => Date.now() - 11 * 5 * 60 * 1000);
 
   const { data: policies } = useQuery({ queryKey: ['policies'], queryFn: fetchPolicies, refetchInterval: 15000 });
   const { data: violations } = useQuery({ queryKey: ['violations'], queryFn: fetchPolicyViolations, refetchInterval: 10000 });
   const { data: summary } = useQuery({ queryKey: ['complianceSummary'], queryFn: fetchComplianceSummary, refetchInterval: 10000 });
-  const { data: complianceTrend } = useQuery({ queryKey: ['complianceTrend'], queryFn: fetchComplianceTrend, refetchInterval: 15000 });
+  const { data: complianceTrend } = useQuery({ queryKey: ['complianceTrend'], queryFn: fetchComplianceTrend, refetchInterval: 10000 });
 
   // Real data from backend
   const riskTrendData = complianceTrend?.length
     ? complianceTrend.map(p => p.risk_exposure)
     : [10, 15, 15, 30, 42, 45, 50, 58, 55, 62, 60, 65];
-  const riskTrendLabels = complianceTrend?.length
-    ? complianceTrend.map((p) => {
-        const d = new Date(p.ts);
-        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-      })
-    : Array.from({ length: riskTrendData.length }, (_, i) => `T${i + 1}`);
 
   const displaySummary = summary || { policiesMonitored: 0, activeViolations: 0, silentViolations: 0, riskExposure: 0, auditReadiness: 0 };
   const displayViolations = violations?.length ? violations : [];
   const displayPolicies = policies?.length ? policies : [];
   const silentViolations = displayViolations.filter((v) => v.type === 'SILENT');
+  const riskGraphPoints = (complianceTrend?.length
+    ? complianceTrend.map((p) => ({ timestamp: p.timestamp, risk_score: p.risk_exposure }))
+    : riskTrendData.map((risk_score, i) => ({
+        timestamp: new Date(syntheticStartMs + i * 5 * 60 * 1000).toISOString(),
+        risk_score,
+      }))
+  );
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -237,28 +236,14 @@ export default function CompliancePage() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h3 className="chart-title">Compliance Risk Trend</h3>
-            <p className="chart-subtitle">Risk score trajectory over time</p>
+            <p className="chart-subtitle">Live risk trajectory over time (auto-refresh every 10s)</p>
           </div>
           <div className="flex items-center gap-2">
             <Sparkline data={riskTrendData.slice(-8)} color="#6366f1" width={60} height={24} />
             <span className="text-lg font-bold text-[var(--color-text-primary)]">{displaySummary.riskExposure}%</span>
           </div>
         </div>
-        <AreaChart
-          data={riskTrendData}
-          color="#6366f1"
-          gradientFrom="rgba(99, 102, 241, 0.25)"
-          gradientTo="rgba(99, 102, 241, 0)"
-          height={200}
-          showGrid={true}
-          showDots={true}
-          showLabels={true}
-          xLabels={riskTrendLabels}
-          xAxisLabel="Time"
-          yAxisLabel="Risk Exposure (%)"
-          yFormatter={(v) => `${Math.round(v)}%`}
-          animated={true}
-        />
+        <RiskGraph data={riskGraphPoints} height={280} showZones={true} />
       </div>
 
       <div className="grid grid-cols-12 gap-6">

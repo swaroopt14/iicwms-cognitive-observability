@@ -18,7 +18,6 @@ import {
   CheckCircle,
   Activity,
   FileText,
-  Network,
   GitMerge,
   Shield,
 } from 'lucide-react';

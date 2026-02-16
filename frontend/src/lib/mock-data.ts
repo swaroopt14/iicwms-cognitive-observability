@@ -276,6 +276,19 @@ export const mockRiskData: RiskIndexResponse = {
   })),
   current_risk: 78.5,
   trend: 'increasing',
+  last_updated: ts(0),
+  top_drivers: [
+    { agent: 'WorkflowAgent', contribution: 42, reason: 'Repeated workflow delays in deploy pipeline', signal_type: 'WORKFLOW_DELAY', evidence_id: 'evt_1199' },
+    { agent: 'ResourceAgent', contribution: 36, reason: 'CPU saturation on build runners', signal_type: 'RESOURCE_PRESSURE', evidence_id: 'metric_893' },
+    { agent: 'ComplianceAgent', contribution: 18, reason: 'Approval step bypass detected', signal_type: 'POLICY_VIOLATION', evidence_id: 'v_003' },
+    { agent: 'WorkflowAgent', contribution: 14, reason: 'Retry loop detected after deployment step', signal_type: 'RETRY_LOOP', evidence_id: 'evt_1203' },
+    { agent: 'ResourceAgent', contribution: 12, reason: 'Network latency spike on api gateway', signal_type: 'NETWORK_LATENCY', evidence_id: 'metric_902' },
+    { agent: 'ComplianceAgent', contribution: 9, reason: 'After-hours access policy flagged', signal_type: 'POLICY_VIOLATION', evidence_id: 'v_014' },
+    { agent: 'WorkflowAgent', contribution: 8, reason: 'Step duration exceeded SLA threshold', signal_type: 'SLA_RISK', evidence_id: 'evt_1211' },
+    { agent: 'ResourceAgent', contribution: 7, reason: 'Disk IO saturation on build runner', signal_type: 'IO_SATURATION', evidence_id: 'metric_910' },
+    { agent: 'ComplianceAgent', contribution: 6, reason: 'Unapproved change window detected', signal_type: 'CHANGE_WINDOW', evidence_id: 'v_021' },
+    { agent: 'WorkflowAgent', contribution: 5, reason: 'Out-of-order step execution observed', signal_type: 'SEQUENCE_VIOLATION', evidence_id: 'evt_1220' },
+  ],
 };
 
 // ============================================

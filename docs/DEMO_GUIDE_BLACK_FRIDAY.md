@@ -106,10 +106,11 @@ Risk states:
 - `VIOLATION`
 - `INCIDENT`
 
-Logic basis:
-- anomaly count
-- policy violation count (weighted higher)
-- escalation trend
+Exact logic:
+- `total_issues = anomaly_count + (2 * policy_violation_count)`
+- `0 -> NORMAL`, `<=1 -> DEGRADED`, `<=3 -> AT_RISK`, `<=5 -> VIOLATION`, `>5 -> INCIDENT`
+- Confidence:
+  - `confidence = min(0.95, 0.5 + min(0.3, anomaly_count*0.1) + min(0.2, policy_violation_count*0.1))`
 
 ### B) Severity scoring (SeverityEngineAgent)
 Score range: `0-10`, mapped to:
@@ -123,6 +124,10 @@ Formula style:
 - Base score from issue type + confidence
 - Context multipliers (asset/data/time/role/repetition/blast/module)
 - Weighted delta, bounded and clamped
+
+Exact equation:
+- `weighted_delta = clamp(sum(weight_i * (factor_i - 1)), -0.4, +0.6)`
+- `final_score = clamp(base_score * (1 + weighted_delta), 0, 10)`
 
 This is deterministic numeric logic, not LLM prompt output.
 
@@ -157,6 +162,18 @@ Confidence is computed by module-specific deterministic math:
 
 ### Query confidence
 - Based on evidence confidence average + bounded evidence-volume bonus
+
+Exact query confidence formula:
+- `avg = mean(top10 evidence confidences clamped to 0..1)`
+- `bonus = min(0.08, 0.01 * max(0, evidence_count - 3))`
+- `query_confidence = min(1.0, avg + bonus)`
+
+### Risk index (0-100) formula used for trend
+- `risk_score = 0.35*workflow_risk + 0.35*resource_risk + 0.30*compliance_risk`
+- Base for each component starts at `20`.
+- Workflow impacts: `MISSING_STEP=25`, `WORKFLOW_DELAY=15`, `SEQUENCE_VIOLATION=20` (scaled by anomaly confidence)
+- Resource impacts: `SUSTAINED_RESOURCE_CRITICAL=30`, `SUSTAINED_RESOURCE_WARNING=15`, `RESOURCE_DRIFT=10` (scaled by anomaly confidence)
+- Compliance impact: `+20` per policy violation
 
 ### Explicit non-claim
 We do **not** assign confidence "because LLM answered strongly."  
@@ -278,4 +295,3 @@ Yes. Adaptive baseline updates thresholds from rolling behavior and sigma deviat
 
 ### "Can it test future changes safely?"
 Yes. What-if sandbox/simulation paths are read-only and produce impact deltas with confidence reasons.
-

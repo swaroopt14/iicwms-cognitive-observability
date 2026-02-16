@@ -1,25 +1,19 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Zap,
   AlertTriangle,
   Filter,
   X,
-  ExternalLink,
   Clock,
-  ChevronRight,
   Sparkles,
   Info,
   FileText,
   GitMerge,
   Activity,
-  ArrowRight,
-  CheckCircle,
-  Shield,
-  TrendingUp,
 } from 'lucide-react';
 import { fetchAnomalies, type Anomaly } from '@/lib/api';
 import { formatTime, formatDateTime } from '@/lib/utils';
@@ -52,89 +46,80 @@ const severityConfig: Record<string, { color: string; bg: string; border: string
   low: { color: '#3b82f6', bg: 'bg-blue-50', border: 'border-blue-200' },
 };
 
-// Anomaly Card
-function AnomalyCard({
-  anomaly,
-  onClick,
-}: {
-  anomaly: Anomaly;
-  onClick: () => void;
-}) {
-  const config = severityConfig[anomaly.severity] || severityConfig.low;
+function displayAnomalyType(type: string): string {
+  const map: Record<string, string> = {
+    SEQUENCE_VIOLATION: 'Workflow Order Deviation',
+    MISSING_STEP: 'Missing Workflow Step',
+    WORKFLOW_DELAY: 'Workflow Delay',
+    SUSTAINED_RESOURCE_CRITICAL: 'Sustained Resource Critical',
+    SUSTAINED_RESOURCE_WARNING: 'Sustained Resource Warning',
+    BASELINE_DEVIATION: 'Baseline Deviation',
+  };
+  return map[type] || type.replace(/_/g, ' ');
+}
 
-  return (
-    <div
-      className={`p-5 rounded-xl border transition-all cursor-pointer group hover:shadow-lg ${config.bg} ${config.border}`}
-      onClick={onClick}
-    >
-      <div className="flex items-start gap-4">
-        <div
-          className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 shadow-md"
-          style={{ backgroundColor: config.color }}
-        >
-          <AlertTriangle className="w-6 h-6 text-white" />
-        </div>
+function displayAnomalySummary(anomaly: Anomaly): string {
+  if (anomaly.type === 'SEQUENCE_VIOLATION') {
+    return 'Workflow steps executed in an unexpected order. This can skip required checks and increase failure/compliance risk.';
+  }
+  if (anomaly.type === 'WORKFLOW_DELAY') {
+    return 'Workflow execution exceeded expected duration and may affect SLA commitments.';
+  }
+  if (anomaly.type === 'SUSTAINED_RESOURCE_CRITICAL') {
+    return 'Resource usage stayed above critical threshold for a sustained window.';
+  }
+  return anomaly.details;
+}
 
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-2">
-            <span
-              className="px-2.5 py-1 text-xs font-semibold rounded-full"
-              style={{ backgroundColor: `${config.color}20`, color: config.color }}
-            >
-              {anomaly.severity.toUpperCase()}
-            </span>
-            <span className="text-xs text-[var(--color-text-muted)] flex items-center gap-1">
-              <Clock className="w-3 h-3" />
-              {formatTime(anomaly.timestamp)}
-            </span>
-          </div>
+function detectionMethod(anomaly: Anomaly): string {
+  switch (anomaly.type) {
+    case 'SEQUENCE_VIOLATION':
+      return 'WorkflowAgent compared observed step order against expected workflow definition and flagged an out-of-order transition.';
+    case 'MISSING_STEP':
+      return 'WorkflowAgent validated required workflow checkpoints and detected that a mandatory step was not executed.';
+    case 'WORKFLOW_DELAY':
+      return 'WorkflowAgent measured step duration against SLA targets and detected sustained overrun.';
+    case 'SUSTAINED_RESOURCE_CRITICAL':
+      return 'ResourceAgent evaluated consecutive resource samples and detected sustained threshold breach (not a transient spike).';
+    case 'SUSTAINED_RESOURCE_WARNING':
+      return 'ResourceAgent detected repeated warning-level utilization/latency above configured limits.';
+    case 'BASELINE_DEVIATION':
+      return 'AdaptiveBaselineAgent compared current signal window against learned baseline and detected statistically significant deviation.';
+    default:
+      return `${anomaly.agent} applied configured anomaly rules and confidence checks to detect this signal.`;
+  }
+}
 
-          <h3 className="font-semibold text-[var(--color-text-primary)] mb-1 group-hover:text-[var(--color-primary)] transition-colors">
-            {anomaly.type.replace(/_/g, ' ')}
-          </h3>
-
-          <p className="text-sm text-[var(--color-text-secondary)] line-clamp-2 mb-3">
-            {anomaly.details}
-          </p>
-
-          <div className="flex items-center justify-between">
-            <ConfidenceBar confidence={anomaly.confidence} />
-            <span className="badge badge-neutral text-xs">{anomaly.agent}</span>
-          </div>
-        </div>
-
-        <ChevronRight className="w-5 h-5 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 transition-opacity" />
-      </div>
-    </div>
-  );
+function detectedScope(anomaly: Anomaly): string {
+  if (anomaly.evidence_ids && anomaly.evidence_ids.length > 0) {
+    return `Detected anomaly scope is linked to ${anomaly.evidence_ids.length} evidence item(s): ${anomaly.evidence_ids.slice(0, 3).join(', ')}${anomaly.evidence_ids.length > 3 ? ', ...' : ''}.`;
+  }
+  return 'Detected anomaly scope is currently limited to the anomaly record; no linked evidence IDs were provided yet.';
 }
 
 // Evidence Detail View
 function EvidenceDetailView({
   anomaly,
   onClose,
-  onBack,
+  viewMode,
+  onViewMode,
+  onNavigate,
 }: {
   anomaly: Anomaly;
   onClose: () => void;
-  onBack: () => void;
+  viewMode: 'detail' | 'evidence';
+  onViewMode: (m: 'detail' | 'evidence') => void;
+  onNavigate: (path: string) => void;
 }) {
   const config = severityConfig[anomaly.severity] || severityConfig.low;
 
   // Rich mock evidence data based on anomaly
   const evidenceTimeline = [
-    { time: '-5m', event: 'Baseline metric recorded', value: 'Normal range', status: 'normal' as const },
-    { time: '-3m', event: 'Metric deviation detected', value: `+1.5σ above baseline`, status: 'warning' as const },
-    { time: '-2m', event: 'Threshold breach triggered', value: `Exceeded ${anomaly.confidence}% confidence`, status: 'critical' as const },
-    { time: '-1m', event: `${anomaly.agent} flagged anomaly`, value: anomaly.type.replace(/_/g, ' '), status: 'critical' as const },
-    { time: 'Now', event: 'Anomaly confirmed & correlated', value: `Linked to ${anomaly.evidence_ids?.length || 0} evidence items`, status: 'info' as const },
-  ];
-
-  const relatedMetrics = [
-    { name: 'CPU Utilization', value: 96, unit: '%', trend: [45, 52, 61, 78, 85, 92, 96], status: 'critical' },
-    { name: 'Memory Usage', value: 78, unit: '%', trend: [55, 58, 62, 65, 70, 74, 78], status: 'warning' },
-    { name: 'Network Latency', value: 420, unit: 'ms', trend: [80, 95, 150, 220, 310, 380, 420], status: 'critical' },
-    { name: 'Error Rate', value: 12.5, unit: '%', trend: [0.5, 1, 2, 4, 7, 10, 12.5], status: 'warning' },
+    { time: '-5m', event: 'Baseline state observed', value: 'System signals were within normal operating range.', status: 'normal' as const },
+    { time: '-3m', event: 'Deviation observed', value: 'One or more signals moved away from baseline trend.', status: 'warning' as const },
+    { time: '-2m', event: 'Rule threshold crossed', value: `Detection threshold crossed at ${anomaly.confidence}% confidence.`, status: 'critical' as const },
+    { time: '-1m', event: `${anomaly.agent} raised anomaly`, value: displayAnomalyType(anomaly.type), status: 'critical' as const },
+    { time: 'Now', event: 'Evidence correlated', value: `${anomaly.evidence_ids?.length || 0} evidence item(s) linked for investigation.`, status: 'info' as const },
   ];
 
   const statusColors = {
@@ -151,15 +136,14 @@ function EvidenceDetailView({
         {/* Header */}
         <div className="p-5 border-b border-[var(--color-border)] flex items-center justify-between bg-gradient-to-r from-slate-50 to-white flex-shrink-0">
           <div className="flex items-center gap-3">
-            <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors">
-              <ChevronRight className="w-4 h-4 rotate-180" />
-            </button>
             <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-md" style={{ backgroundColor: config.color }}>
               <FileText className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="font-semibold text-lg text-[var(--color-text-primary)]">Evidence Chain</h2>
-              <p className="text-xs text-[var(--color-text-muted)]">{anomaly.anomaly_id} · {anomaly.type.replace(/_/g, ' ')}</p>
+              <h2 className="font-semibold text-lg text-[var(--color-text-primary)]">
+                {viewMode === 'detail' ? 'Anomaly Details' : 'Evidence Chain'}
+              </h2>
+              <p className="text-xs text-[var(--color-text-muted)]">{anomaly.anomaly_id} · {displayAnomalyType(anomaly.type)}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 transition-colors">
@@ -167,8 +151,111 @@ function EvidenceDetailView({
           </button>
         </div>
 
+        {/* Tabs */}
+        <div className="px-5 pt-4 pb-3 border-b border-[var(--color-border)] flex items-center gap-2 bg-white flex-shrink-0">
+          <button
+            className={`px-3 py-1.5 rounded-xl text-sm font-semibold border transition-colors ${
+              viewMode === 'detail'
+                ? 'bg-indigo-600 text-white border-indigo-600'
+                : 'bg-white text-[var(--color-text-primary)] border-[var(--color-border)] hover:bg-slate-50'
+            }`}
+            onClick={() => onViewMode('detail')}
+          >
+            Details
+          </button>
+          <button
+            className={`px-3 py-1.5 rounded-xl text-sm font-semibold border transition-colors ${
+              viewMode === 'evidence'
+                ? 'bg-indigo-600 text-white border-indigo-600'
+                : 'bg-white text-[var(--color-text-primary)] border-[var(--color-border)] hover:bg-slate-50'
+            }`}
+            onClick={() => onViewMode('evidence')}
+          >
+            Evidence
+          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button className="btn btn-secondary btn-sm" onClick={() => onNavigate('/causal-analysis')}>
+              <GitMerge className="w-4 h-4" />
+              Causal
+            </button>
+          </div>
+        </div>
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
+          {viewMode === 'detail' && (
+            <>
+              {/* Status Grid */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-4 rounded-xl border border-[var(--color-border)]">
+                  <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Severity</div>
+                  <span
+                    className="px-3 py-1.5 rounded-full text-sm font-semibold"
+                    style={{ backgroundColor: `${config.color}15`, color: config.color }}
+                  >
+                    {anomaly.severity.toUpperCase()}
+                  </span>
+                </div>
+                <div className="p-4 rounded-xl border border-[var(--color-border)]">
+                  <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Confidence</div>
+                  <div className="flex items-center gap-2">
+                    <DonutChart value={anomaly.confidence} total={100} color={config.color} size={40} strokeWidth={4} />
+                    <span className="text-lg font-bold" style={{ color: config.color }}>
+                      {anomaly.confidence}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Trend */}
+              <div className="p-4 rounded-xl border border-[var(--color-border)]">
+                <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-3">Related Trend</div>
+                <Sparkline
+                  data={Array.from({ length: 10 }, (_, i) =>
+                    Math.max(0, Math.min(100, anomaly.confidence - 10 + i * 2 + (i % 2 ? -1 : 2)))
+                  )}
+                  color={config.color}
+                  width={520}
+                  height={56}
+                />
+              </div>
+
+              {/* Details */}
+              <div>
+                <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Details</div>
+                <p className="text-sm text-[var(--color-text-primary)] leading-relaxed p-4 bg-slate-50 rounded-xl">
+                  {displayAnomalySummary(anomaly)}
+                </p>
+              </div>
+
+              {/* Metadata */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 bg-[var(--color-surface-tertiary)] rounded-xl">
+                  <div className="text-xs text-[var(--color-text-muted)] mb-1">Agent</div>
+                  <div className="text-sm font-semibold text-[var(--color-text-primary)]">{anomaly.agent}</div>
+                </div>
+                <div className="p-3 bg-[var(--color-surface-tertiary)] rounded-xl">
+                  <div className="text-xs text-[var(--color-text-muted)] mb-1">Detected</div>
+                  <div className="text-sm font-semibold text-[var(--color-text-primary)]">{formatDateTime(anomaly.timestamp)}</div>
+                </div>
+              </div>
+
+              {/* Evidence */}
+              {anomaly.evidence_ids && anomaly.evidence_ids.length > 0 && (
+                <div>
+                  <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Evidence</div>
+                  <div className="flex flex-wrap gap-2">
+                    {anomaly.evidence_ids.map((id) => (
+                      <code key={id} className="text-xs bg-slate-100 px-3 py-1.5 rounded-lg">{id}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {viewMode === 'evidence' && (
+            <>
           {/* Evidence Summary Card */}
           <div className="p-4 rounded-xl border border-[var(--color-border)] bg-gradient-to-r from-slate-50 to-white">
             <div className="flex items-center justify-between mb-3">
@@ -177,7 +264,7 @@ function EvidenceDetailView({
                 {anomaly.evidence_ids?.length || 0} items
               </span>
             </div>
-            <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">{anomaly.details}</p>
+            <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">{displayAnomalySummary(anomaly)}</p>
           </div>
 
           {/* Evidence IDs */}
@@ -227,21 +314,44 @@ function EvidenceDetailView({
             </div>
           </div>
 
-          {/* Related Metrics */}
+          {/* What This Means */}
+          <div className="p-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-tertiary)]">
+            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">What This Means</div>
+            <p className="text-sm text-[var(--color-text-primary)] mb-2 leading-relaxed">
+              This anomaly is a verified warning that normal system behavior was broken in a way that can affect uptime, SLA commitments, and audit traceability.
+            </p>
+            <ul className="text-sm text-[var(--color-text-secondary)] list-disc pl-5 space-y-2">
+              <li>Start from the first linked evidence ID and confirm the exact first failure point (step, service, or resource).</li>
+              <li>Check timeline order: verify whether customer impact, SLA delay, or policy risk started after this anomaly trigger.</li>
+              <li>Validate blast radius before action: identify which workflows/services are impacted vs unaffected.</li>
+              <li>Apply mitigation only after evidence validation, then re-check next cycle to confirm recovery and avoid false closure.</li>
+            </ul>
+          </div>
+
+          {/* Agent Detection Summary */}
           <div>
-            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-3 font-semibold">Correlated Metrics</div>
-            <div className="grid grid-cols-2 gap-3">
-              {relatedMetrics.map((m) => (
-                <div key={m.name} className="p-3 rounded-xl border border-[var(--color-border)]">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs text-[var(--color-text-muted)]">{m.name}</span>
-                    <span className={`text-xs font-bold ${m.status === 'critical' ? 'text-red-500' : 'text-amber-500'}`}>
-                      {m.value}{m.unit}
-                    </span>
-                  </div>
-                  <Sparkline data={m.trend} color={m.status === 'critical' ? '#ef4444' : '#f59e0b'} width={120} height={24} />
-                </div>
-              ))}
+            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-3 font-semibold">Agent Detection Summary</div>
+            <div className="space-y-3">
+              <div className="p-3 rounded-xl border border-[var(--color-border)] bg-white">
+                <div className="text-xs text-[var(--color-text-muted)] mb-1">Detected By</div>
+                <div className="text-sm font-semibold text-[var(--color-text-primary)]">{anomaly.agent}</div>
+              </div>
+              <div className="p-3 rounded-xl border border-[var(--color-border)] bg-white">
+                <div className="text-xs text-[var(--color-text-muted)] mb-1">How It Was Detected</div>
+                <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">{detectionMethod(anomaly)}</p>
+              </div>
+              <div className="p-3 rounded-xl border border-[var(--color-border)] bg-white">
+                <div className="text-xs text-[var(--color-text-muted)] mb-1">What Was Detected</div>
+                <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
+                  {displayAnomalyType(anomaly.type)} with {anomaly.confidence}% confidence. {detectedScope(anomaly)}
+                </p>
+              </div>
+              <div className="p-3 rounded-xl border border-[var(--color-border)] bg-white">
+                <div className="text-xs text-[var(--color-text-muted)] mb-1">Operator Next Step</div>
+                <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
+                  Open Evidence IDs, validate first failure cause, confirm impact timeline, then execute mitigation and verify in the next reasoning cycle.
+                </p>
+              </div>
             </div>
           </div>
 
@@ -261,142 +371,8 @@ function EvidenceDetailView({
               </div>
             </div>
           </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// Anomaly Detail Modal
-function AnomalyDetailModal({
-  anomaly,
-  onClose,
-  onViewEvidence,
-  onNavigate,
-}: {
-  anomaly: Anomaly;
-  onClose: () => void;
-  onViewEvidence: () => void;
-  onNavigate: (path: string) => void;
-}) {
-  const config = severityConfig[anomaly.severity] || severityConfig.low;
-
-  // Deterministic trend data (render-safe, no random in component body)
-  const base = Math.max(20, Math.min(90, Math.round(anomaly.confidence * 100)));
-  const trendData = Array.from({ length: 8 }, (_, i) =>
-    Math.max(0, Math.min(100, base - 10 + i * 2 + (i % 2 === 0 ? 3 : -2)))
-  );
-
-  return (
-    <>
-      <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4" onClick={onClose}>
-        <div
-          className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-hidden animate-scale-in"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* Header */}
-          <div className="p-5 border-b border-[var(--color-border)] flex items-center justify-between bg-gradient-to-r from-slate-50 to-white">
-            <div className="flex items-center gap-3">
-              <div
-                className="w-10 h-10 rounded-xl flex items-center justify-center shadow-md"
-                style={{ backgroundColor: config.color }}
-              >
-                <AlertTriangle className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h2 className="font-semibold text-lg text-[var(--color-text-primary)]">
-                  {anomaly.type.replace(/_/g, ' ')}
-                </h2>
-                <p className="text-sm text-[var(--color-text-muted)]">Anomaly Details</p>
-              </div>
-            </div>
-            <button onClick={onClose} className="p-2 rounded-xl hover:bg-slate-100 transition-colors">
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Content */}
-          <div className="p-5 space-y-5 overflow-y-auto max-h-[calc(90vh-140px)]">
-            {/* Status Grid */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 rounded-xl border border-[var(--color-border)]">
-                <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Severity</div>
-                <span
-                  className="px-3 py-1.5 rounded-full text-sm font-semibold"
-                  style={{ backgroundColor: `${config.color}15`, color: config.color }}
-                >
-                  {anomaly.severity.toUpperCase()}
-                </span>
-              </div>
-              <div className="p-4 rounded-xl border border-[var(--color-border)]">
-                <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Confidence</div>
-                <div className="flex items-center gap-2">
-                  <DonutChart
-                    value={anomaly.confidence}
-                    total={100}
-                    color={config.color}
-                    size={40}
-                    strokeWidth={4}
-                  />
-                  <span className="text-lg font-bold" style={{ color: config.color }}>
-                    {anomaly.confidence}%
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Trend */}
-            <div className="p-4 rounded-xl border border-[var(--color-border)]">
-              <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-3">
-                Related Metric Trend
-              </div>
-              <Sparkline data={trendData} color={config.color} width={320} height={48} />
-            </div>
-
-            {/* Details */}
-            <div>
-              <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Details</div>
-              <p className="text-sm text-[var(--color-text-primary)] leading-relaxed p-4 bg-slate-50 rounded-xl">
-                {anomaly.details}
-              </p>
-            </div>
-
-            {/* Metadata */}
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-[var(--color-surface-tertiary)] rounded-xl">
-                <div className="text-xs text-[var(--color-text-muted)] mb-1">Agent</div>
-                <div className="text-sm font-semibold text-[var(--color-text-primary)]">{anomaly.agent}</div>
-              </div>
-              <div className="p-3 bg-[var(--color-surface-tertiary)] rounded-xl">
-                <div className="text-xs text-[var(--color-text-muted)] mb-1">Detected</div>
-                <div className="text-sm font-semibold text-[var(--color-text-primary)]">{formatDateTime(anomaly.timestamp)}</div>
-              </div>
-            </div>
-
-            {/* Evidence */}
-            {anomaly.evidence_ids && anomaly.evidence_ids.length > 0 && (
-              <div>
-                <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Evidence</div>
-                <div className="flex flex-wrap gap-2">
-                  {anomaly.evidence_ids.map((id) => (
-                    <code key={id} className="text-xs bg-slate-100 px-3 py-1.5 rounded-lg">{id}</code>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="pt-4 border-t border-[var(--color-border)] space-y-3">
-              <button className="btn btn-primary w-full" onClick={() => onNavigate('/causal-analysis')}>
-                <GitMerge className="w-4 h-4" />
-                View Causal Analysis
-              </button>
-              <button className="btn btn-secondary w-full" onClick={onViewEvidence}>
-                <FileText className="w-4 h-4" />
-                View Evidence Chain
-              </button>
-            </div>
-          </div>
+            </>
+          )}
         </div>
       </div>
     </>
@@ -409,6 +385,7 @@ export default function AnomalyCenterPage() {
   const [viewMode, setViewMode] = useState<'detail' | 'evidence'>('detail');
   const [filterAgent, setFilterAgent] = useState<string>('all');
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
+  const [filterText, setFilterText] = useState<string>('');
 
   const { data: anomalies } = useQuery({
     queryKey: ['anomalies'],
@@ -416,14 +393,28 @@ export default function AnomalyCenterPage() {
     refetchInterval: 10000,
   });
 
-  const displayAnomalies = anomalies || [];
+  const displayAnomalies = useMemo(() => anomalies || [], [anomalies]);
 
   // Filter anomalies
-  const filteredAnomalies = displayAnomalies.filter((a) => {
-    if (filterAgent !== 'all' && a.agent !== filterAgent) return false;
-    if (filterSeverity !== 'all' && a.severity !== filterSeverity) return false;
-    return true;
-  });
+  const filteredAnomalies = useMemo(() => {
+    const q = (filterText || '').trim().toLowerCase();
+    return displayAnomalies.filter((a) => {
+      if (filterAgent !== 'all' && a.agent !== filterAgent) return false;
+      if (filterSeverity !== 'all' && a.severity !== filterSeverity) return false;
+      if (!q) return true;
+      const hay = [
+        a.anomaly_id,
+        a.type,
+        displayAnomalyType(a.type),
+        a.details,
+        a.agent,
+        ...(a.evidence_ids || []),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [displayAnomalies, filterAgent, filterSeverity, filterText]);
 
   // Stats
   const stats = {
@@ -451,6 +442,22 @@ export default function AnomalyCenterPage() {
           <div>
             <h1 className="page-title">Anomaly Center</h1>
             <p className="page-subtitle">Central hub for all detected anomalies across the system</p>
+          </div>
+        </div>
+      </div>
+
+      {/* About */}
+      <div className="card p-5 bg-gradient-to-r from-slate-50 to-white border border-[var(--color-border)]">
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-indigo-100 flex items-center justify-center flex-shrink-0">
+            <Info className="w-5 h-5 text-indigo-700" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-[var(--color-text-primary)] mb-1">About Anomaly Detection</div>
+            <p className="text-sm text-[var(--color-text-secondary)] leading-relaxed">
+              Anomalies are detected by specialized agents: ResourceAgent monitors infrastructure metrics, WorkflowAgent tracks workflow execution patterns,
+              and ComplianceAgent validates policy adherence. Each anomaly includes confidence scores and evidence links for full traceability.
+            </p>
           </div>
         </div>
       </div>
@@ -506,143 +513,168 @@ export default function AnomalyCenterPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-6">
-        {/* Filters & Chart */}
-        <div className="col-span-3 space-y-4">
-          {/* Filters */}
-          <div className="card p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Filter className="w-4 h-4 text-[var(--color-text-muted)]" />
-              <h3 className="font-semibold text-[var(--color-text-primary)]">Filters</h3>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 block">
-                  Agent Source
-                </label>
-                <select value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} className="input w-full">
-                  <option value="all">All Agents</option>
-                  {agents.map((a) => (
-                    <option key={a} value={a}>{a}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 block">
-                  Severity
-                </label>
-                <select value={filterSeverity} onChange={(e) => setFilterSeverity(e.target.value)} className="input w-full">
-                  <option value="all">All Severities</option>
-                  <option value="critical">Critical</option>
-                  <option value="high">High</option>
-                  <option value="medium">Medium</option>
-                  <option value="low">Low</option>
-                </select>
-              </div>
-            </div>
+      {/* Log View */}
+      <div className="card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Filter className="w-4 h-4 text-[var(--color-text-muted)]" />
+            <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">Anomaly Log</h2>
+            <span className="text-sm text-[var(--color-text-muted)]">({filteredAnomalies.length})</span>
           </div>
+          <div className="text-xs text-[var(--color-text-muted)] flex items-center gap-2">
+            <Clock className="w-3 h-3" />
+            Auto-refresh every 10s
+          </div>
+        </div>
 
-          {/* Severity Distribution Chart */}
-          <div className="chart-container">
-            <h3 className="chart-title mb-4">Severity Distribution</h3>
-            <BarChart
-              data={severityData}
-              colors={['#ef4444', '#f97316', '#f59e0b', '#3b82f6']}
-              height={170}
-              showGrid={false}
-              barRadius={6}
-              animated={true}
-              xLabels={['Critical', 'High', 'Medium', 'Low']}
-              xAxisLabel="Severity Level"
-              yAxisLabel="Anomaly Count"
-              yFormatter={(v) => `${Math.round(v)}`}
+        {/* Filter bar */}
+        <div className="mt-4 grid grid-cols-12 gap-3">
+          <div className="col-span-12 md:col-span-4">
+            <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-2 uppercase tracking-wider">Search</label>
+            <input
+              className="input input-bordered w-full"
+              placeholder="type, id, agent, evidence id..."
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
             />
-            <div className="flex items-center justify-center gap-4 mt-4">
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="w-2.5 h-2.5 rounded-full bg-red-500"></span>
-                Critical
-              </div>
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="w-2.5 h-2.5 rounded-full bg-orange-500"></span>
-                High
-              </div>
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
-                Medium
-              </div>
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
-                Low
-              </div>
-            </div>
+          </div>
+          <div className="col-span-6 md:col-span-4">
+            <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-2 uppercase tracking-wider">Agent</label>
+            <select className="input w-full" value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)}>
+              <option value="all">All Agents</option>
+              {agents.map((a) => (
+                <option key={a} value={a}>{a}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col-span-6 md:col-span-3">
+            <label className="block text-xs font-semibold text-[var(--color-text-muted)] mb-2 uppercase tracking-wider">Severity</label>
+            <select className="input w-full" value={filterSeverity} onChange={(e) => setFilterSeverity(e.target.value)}>
+              <option value="all">All Severities</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div className="col-span-12 md:col-span-1 flex items-end">
+            {(filterAgent !== 'all' || filterSeverity !== 'all' || filterText.trim()) && (
+              <button
+                className="btn btn-ghost btn-sm w-full"
+                onClick={() => {
+                  setFilterAgent('all');
+                  setFilterSeverity('all');
+                  setFilterText('');
+                }}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Anomaly List */}
-        <div className="col-span-9">
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-[var(--color-text-primary)]">
-                {filteredAnomalies.length} Anomalies
-                {filterAgent !== 'all' || filterSeverity !== 'all' ? ' (filtered)' : ''}
-              </h3>
-            </div>
-
-            <div className="grid grid-cols-1 gap-4">
-              {filteredAnomalies.length > 0 ? (
-                filteredAnomalies.map((anomaly) => (
-                  <AnomalyCard
-                    key={anomaly.anomaly_id}
-                    anomaly={anomaly}
-                    onClick={() => setSelectedAnomaly(anomaly)}
-                  />
-                ))
-              ) : (
-                <div className="text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                  <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
-                    <Sparkles className="w-8 h-8 text-slate-400" />
-                  </div>
-                  <p className="text-[var(--color-text-muted)]">No anomalies match your filters</p>
-                </div>
-              )}
-            </div>
+        {/* Table */}
+        <div className="mt-5 table-container">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px]">
+              <thead className="table-header">
+              <tr>
+                <th className="w-[150px]">Time</th>
+                <th className="w-[140px]">Severity</th>
+                <th>Type</th>
+                <th className="w-[160px]">Agent</th>
+                <th className="w-[170px]">Confidence</th>
+                <th className="w-[140px]">Evidence</th>
+              </tr>
+              </thead>
+              <tbody className="table-body">
+                {filteredAnomalies.map((a) => {
+                  const cfg = severityConfig[a.severity] || severityConfig.low;
+                  const isSelected = selectedAnomaly?.anomaly_id === a.anomaly_id;
+                  return (
+                    <tr
+                      key={a.anomaly_id}
+                      className={`cursor-pointer ${isSelected ? 'bg-indigo-50' : ''}`}
+                      onClick={() => {
+                        setSelectedAnomaly(a);
+                        setViewMode('detail');
+                      }}
+                    >
+                      <td className="whitespace-nowrap text-xs font-mono text-[var(--color-text-muted)]">
+                        {formatTime(a.timestamp)}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        <span
+                          className="px-2.5 py-1 text-xs font-semibold rounded-full"
+                          style={{ backgroundColor: `${cfg.color}20`, color: cfg.color }}
+                        >
+                          {a.severity.toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="min-w-[360px]">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4" style={{ color: cfg.color }} />
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold text-[var(--color-text-primary)]">{displayAnomalyType(a.type)}</div>
+                            <div className="text-xs text-[var(--color-text-muted)] line-clamp-1">{displayAnomalySummary(a)}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap">
+                        <span className="badge badge-neutral text-xs">{a.agent}</span>
+                      </td>
+                      <td className="whitespace-nowrap">
+                        <ConfidenceBar confidence={a.confidence} />
+                      </td>
+                      <td className="whitespace-nowrap text-xs text-[var(--color-text-muted)]">
+                        {a.evidence_ids?.length ? `${a.evidence_ids.length} item(s)` : 'none'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
+        </div>
+
+        {filteredAnomalies.length === 0 && (
+          <div className="mt-5 text-center py-12 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+            <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mx-auto mb-4">
+              <Sparkles className="w-8 h-8 text-slate-400" />
+            </div>
+            <p className="text-[var(--color-text-muted)]">No anomalies match your filters</p>
+          </div>
+        )}
+
+        {/* Severity Distribution (small, below table) */}
+        <div className="mt-6 p-4 rounded-xl border border-[var(--color-border)]">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-semibold text-[var(--color-text-primary)]">Severity Distribution</div>
+            <div className="text-xs text-[var(--color-text-muted)]">Current window</div>
+          </div>
+          <BarChart
+            data={severityData}
+            colors={['#ef4444', '#f97316', '#f59e0b', '#3b82f6']}
+            height={170}
+            showGrid={false}
+            barRadius={6}
+            animated={true}
+            xLabels={['Critical', 'High', 'Medium', 'Low']}
+            xAxisLabel="Severity Level"
+            yAxisLabel="Anomaly Count"
+            yFormatter={(v) => `${Math.round(v)}`}
+          />
         </div>
       </div>
 
-      {/* Info */}
-      <div className="p-5 bg-gradient-to-r from-amber-50 via-orange-50 to-yellow-50 rounded-2xl border border-amber-100">
-        <div className="flex items-start gap-4">
-          <div className="icon-container icon-container-md bg-gradient-to-br from-amber-500 to-orange-500 shadow-lg flex-shrink-0">
-            <Info className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <div className="font-semibold text-amber-900 mb-1">About Anomaly Detection</div>
-            <p className="text-sm text-amber-700 leading-relaxed">
-              Anomalies are detected by specialized agents: <strong>ResourceAgent</strong> monitors infrastructure metrics,
-              <strong> WorkflowAgent</strong> tracks workflow execution patterns, and <strong>ComplianceAgent</strong> validates policy adherence.
-              Each anomaly includes confidence scores and evidence links for full traceability.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Modal / Evidence View */}
-      {selectedAnomaly && viewMode === 'detail' && (
-        <AnomalyDetailModal
-          anomaly={selectedAnomaly}
-          onClose={() => { setSelectedAnomaly(null); setViewMode('detail'); }}
-          onViewEvidence={() => setViewMode('evidence')}
-          onNavigate={(path) => { setSelectedAnomaly(null); router.push(path); }}
-        />
-      )}
-      {selectedAnomaly && viewMode === 'evidence' && (
+      {/* Right Drawer */}
+      {selectedAnomaly && (
         <EvidenceDetailView
           anomaly={selectedAnomaly}
+          viewMode={viewMode}
+          onViewMode={setViewMode}
+          onNavigate={(path) => { setSelectedAnomaly(null); router.push(path); }}
           onClose={() => { setSelectedAnomaly(null); setViewMode('detail'); }}
-          onBack={() => setViewMode('detail')}
         />
       )}
     </div>

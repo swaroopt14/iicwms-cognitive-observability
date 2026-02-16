@@ -14,13 +14,12 @@ import {
   ArrowRight,
   Camera,
   Download,
-  Network,
   Activity,
   TrendingUp,
   Clock,
   FileText,
 } from 'lucide-react';
-import { fetchCausalLinks, type CausalLink } from '@/lib/api';
+import { fetchCausalLinks, fetchWorkflows, type CausalLink } from '@/lib/api';
 import { formatTime } from '@/lib/utils';
 import { DonutChart, Sparkline } from '@/components/Charts';
 
@@ -645,18 +644,12 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
             </div>
           </div>
 
-          {/* Confidence & Correlation Trend */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="p-4 rounded-xl border border-[var(--color-border)]">
-              <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Confidence</div>
-              <div className="flex items-center gap-3">
-                <DonutChart value={link.confidence} total={100} color={confidenceColor} size={48} strokeWidth={5} />
-                <span className="text-2xl font-bold" style={{ color: confidenceColor }}>{link.confidence}%</span>
-              </div>
-            </div>
-            <div className="p-4 rounded-xl border border-[var(--color-border)]">
-              <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Confidence History</div>
-              <Sparkline data={trendData} color="#6366f1" width={140} height={48} />
+          {/* Confidence */}
+          <div className="p-4 rounded-xl border border-[var(--color-border)]">
+            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2">Confidence</div>
+            <div className="flex items-center gap-3">
+              <DonutChart value={link.confidence} total={100} color={confidenceColor} size={48} strokeWidth={5} />
+              <span className="text-2xl font-bold" style={{ color: confidenceColor }}>{link.confidence}%</span>
             </div>
           </div>
 
@@ -683,23 +676,26 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
 
           {/* Reasoning */}
           <div>
-            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">Easy Explanation</div>
+            <div className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider mb-2 font-semibold">Explanation</div>
             <div className="p-4 bg-slate-50 rounded-xl space-y-3">
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>What happened:</strong>{' '}
+                <strong>Plain English:</strong>{' '}
                 {link.easy_summary || `${link.cause.replace(/_/g, ' ')} likely led to ${link.effect.replace(/_/g, ' ')}`}.
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Why we think this:</strong>{' '}
-                {link.reasoning || `This pattern repeats in recent cycles where ${link.cause} appears before ${link.effect}.`}
+                <strong>Technical:</strong>{' '}
+                {link.reasoning || `Temporal ordering + repeated co‑occurrence indicate ${link.cause} consistently precedes ${link.effect} across recent cycles, suggesting a causal dependency rather than a coincidental correlation.`}
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Confidence:</strong> <code>{link.confidence}%</code> (higher means stronger repeated evidence).
+                <strong>Confidence:</strong> <code>{link.confidence}%</code>. Based on recurrence strength, ordering stability, and supporting evidence density.
               </p>
               <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
-                <strong>Competing causes:</strong> {competingCauses === 0
-                  ? `No competing causes currently linked to "${link.effect}" in the active graph.`
-                  : `${competingCauses} alternate cause link(s) also target "${link.effect}". Validate against evidence before final decision.`}
+                <strong>Alternates:</strong> {competingCauses === 0
+                  ? `No competing causes are currently linked to "${link.effect}" in the active graph.`
+                  : `${competingCauses} alternate cause link(s) also target "${link.effect}". Prioritize the most recent/highest‑confidence chain and validate against evidence IDs.`}
+              </p>
+              <p className="text-sm text-[var(--color-text-primary)] leading-relaxed">
+                <strong>Operational Note:</strong> Treat this as a ranked hypothesis; validate quickly using linked evidence before executing high‑risk mitigation steps.
               </p>
             </div>
           </div>
@@ -790,19 +786,51 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
 export default function CausalAnalysisPage() {
   const router = useRouter();
   const [selectedLink, setSelectedLink] = useState<CausalLink | null>(null);
+  const [selectedWorkflow, setSelectedWorkflow] = useState<string>('all');
 
   const { data: links } = useQuery({
     queryKey: ['causalLinks'],
     queryFn: fetchCausalLinks,
     refetchInterval: 10000,
   });
+  const { data: workflows } = useQuery({
+    queryKey: ['workflows'],
+    queryFn: fetchWorkflows,
+    refetchInterval: 30000,
+  });
 
-  const displayLinks = links || [];
+  const displayLinks = useMemo(() => links || [], [links]);
+  const workflowIds = useMemo(() => {
+    const ids = new Set<string>();
+    (workflows || []).forEach((w) => {
+      if (w.workflow_id) ids.add(w.workflow_id);
+    });
+    const re = /wf_[a-zA-Z0-9_-]+/g;
+    displayLinks.forEach((l) => {
+      const inCause = l.cause.match(re) || [];
+      const inEffect = l.effect.match(re) || [];
+      inCause.concat(inEffect).forEach((id) => ids.add(id));
+    });
+    return Array.from(ids).sort();
+  }, [displayLinks, workflows]);
+
+  useEffect(() => {
+    if (selectedWorkflow !== 'all' && !workflowIds.includes(selectedWorkflow)) {
+      setSelectedWorkflow('all');
+    }
+  }, [selectedWorkflow, workflowIds]);
+
+  const filteredLinks = useMemo(() => {
+    if (selectedWorkflow === 'all') return displayLinks;
+    return displayLinks.filter(
+      (l) => l.cause.includes(selectedWorkflow) || l.effect.includes(selectedWorkflow)
+    );
+  }, [displayLinks, selectedWorkflow]);
 
   // Summary stats
-  const uniqueNodes = new Set(displayLinks.flatMap(l => [l.cause, l.effect])).size;
-  const avgConfidence = displayLinks.length > 0 ? Math.round(displayLinks.reduce((a, l) => a + l.confidence, 0) / displayLinks.length) : 0;
-  const highConfLinks = displayLinks.filter(l => l.confidence >= 90).length;
+  const uniqueNodes = new Set(filteredLinks.flatMap(l => [l.cause, l.effect])).size;
+  const avgConfidence = filteredLinks.length > 0 ? Math.round(filteredLinks.reduce((a, l) => a + l.confidence, 0) / filteredLinks.length) : 0;
+  const highConfLinks = filteredLinks.filter(l => l.confidence >= 90).length;
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -813,8 +841,40 @@ export default function CausalAnalysisPage() {
             <GitMerge className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="page-title">Causal Analysis</h1>
-            <p className="page-subtitle">Evidence-backed causal relationships between system events</p>
+            <h1 className="page-title">Root Cause Explorer</h1>
+            <p className="page-subtitle">Trace why issues happened and what they impacted</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">Workflow</label>
+          <select
+            className="input w-[220px]"
+            value={selectedWorkflow}
+            onChange={(e) => {
+              setSelectedWorkflow(e.target.value);
+              setSelectedLink(null);
+            }}
+          >
+            <option value="all">All deployments</option>
+            {workflowIds.map((id) => (
+              <option key={id} value={id}>{id}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* How It Works */}
+      <div className="p-5 bg-gradient-to-r from-indigo-50 via-violet-50 to-purple-50 rounded-2xl border border-indigo-100">
+        <div className="flex items-start gap-4">
+          <div className="icon-container icon-container-md bg-gradient-to-br from-indigo-500 to-violet-500 shadow-lg flex-shrink-0">
+            <Info className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <div className="font-semibold text-indigo-900 mb-1">How Causal Analysis Works</div>
+            <p className="text-sm text-indigo-700 leading-relaxed">
+              The <strong>Causal Agent</strong> correlates event ordering, dependency maps, and repeated signal patterns to infer cause → effect.
+              Each link is scored for confidence and tied to evidence IDs so teams can validate quickly and respond safely.
+            </p>
           </div>
         </div>
       </div>
@@ -825,7 +885,7 @@ export default function CausalAnalysisPage() {
           <div className="flex items-center justify-between">
             <div>
               <div className="stats-label">Causal Links</div>
-              <div className="stats-value text-indigo-600">{displayLinks.length}</div>
+              <div className="stats-value text-indigo-600">{filteredLinks.length}</div>
             </div>
             <div className="icon-container icon-container-md bg-indigo-100">
               <GitMerge className="w-5 h-5 text-indigo-600" />
@@ -870,36 +930,36 @@ export default function CausalAnalysisPage() {
         <div className="col-span-8">
           <div className="chart-container" style={{ height: '520px' }}>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="chart-title">Causal Relationship Graph</h3>
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" /> Resource
-                  <span className="w-2 h-2 rounded-full bg-indigo-500 ml-2" /> Workflow
-                  <span className="w-2 h-2 rounded-full bg-red-500 ml-2" /> Compliance
-                  <span className="w-2 h-2 rounded-full bg-amber-500 ml-2" /> Network
-                </div>
-                <span className="badge badge-info">{displayLinks.length} links</span>
+              <h3 className="chart-title">Cause → Effect Graph</h3>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" /> Resource
+                <span className="w-2 h-2 rounded-full bg-indigo-500 ml-2" /> Workflow
+                <span className="w-2 h-2 rounded-full bg-red-500 ml-2" /> Compliance
+                <span className="w-2 h-2 rounded-full bg-amber-500 ml-2" /> Network
               </div>
-            </div>
-            <div className="h-[calc(100%-40px)]">
-              <CausalGraph
-                links={displayLinks}
-                selectedLink={selectedLink}
-                onLinkSelect={setSelectedLink}
-              />
+              <span className="badge badge-info">{filteredLinks.length} links</span>
             </div>
           </div>
+          <div className="h-[calc(100%-40px)]">
+            <CausalGraph
+              links={filteredLinks}
+              selectedLink={selectedLink}
+              onLinkSelect={setSelectedLink}
+            />
+          </div>
         </div>
+      </div>
 
         {/* Link List */}
         <div className="col-span-4">
           <div className="card p-4 h-[520px] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-[var(--color-text-primary)]">Causal Links</h3>
+              <h3 className="font-semibold text-[var(--color-text-primary)]">Cause Links</h3>
               <span className="text-[10px] text-[var(--color-text-muted)]">Click to inspect</span>
             </div>
             <div className="flex-1 overflow-y-auto space-y-2.5">
-              {displayLinks.map((link, i) => (
+              {filteredLinks.map((link, i) => (
                 <CausalLinkCard
                   key={i}
                   link={link}
@@ -916,27 +976,11 @@ export default function CausalAnalysisPage() {
       {selectedLink && (
         <InsightDetailPanel
           link={selectedLink}
-          allLinks={displayLinks}
+          allLinks={filteredLinks}
           onClose={() => setSelectedLink(null)}
           onNavigate={(path) => { setSelectedLink(null); router.push(path); }}
         />
       )}
-
-      {/* Info */}
-      <div className="p-5 bg-gradient-to-r from-indigo-50 via-violet-50 to-purple-50 rounded-2xl border border-indigo-100">
-        <div className="flex items-start gap-4">
-          <div className="icon-container icon-container-md bg-gradient-to-br from-indigo-500 to-violet-500 shadow-lg flex-shrink-0">
-            <Info className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <div className="font-semibold text-indigo-900 mb-1">How Causal Analysis Works</div>
-            <p className="text-sm text-indigo-700 leading-relaxed">
-              The <strong>Causal Agent</strong> checks event order and known dependency patterns to explain likely cause and effect.
-              Each link includes confidence and evidence IDs so teams can verify quickly and act safely.
-            </p>
-          </div>
-        </div>
-      </div>
 
     </div>
   );
