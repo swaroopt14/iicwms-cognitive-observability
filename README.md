@@ -409,6 +409,24 @@ Each service directory also contains its own `README.md` with interface contract
 
 ---
 
+
+#  Phase 1 – Foundation & Architecture
+
+### 1️⃣ Initial Project Scaffold
+
+```
+feat: initialize IICWMS Chronos AI monorepo structure
+
+- Created 10-service architecture layout
+- Added backend service directories (simulator → graph)
+- Added frontend Next.js 16 scaffold
+- Added docs/, scripts/, guards.py
+- Established modular microservice boundaries
+```
+
+---
+
+
 ## License
 
 MIT License
