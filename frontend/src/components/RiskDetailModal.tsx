@@ -36,7 +36,7 @@ export default function RiskDetailModal({ point, isOpen, onClose }: RiskDetailMo
       <div className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-96 z-50 bg-white rounded-2xl shadow-2xl border border-slate-200 animate-fade-in">
         {/* Header */}
         <div className={`flex items-center justify-between p-6 border-b ${colors.border} ${colors.bg}`}>
-          <h2 className={`text-lg font-bold ${colors.text}`}>Risk Index Snapshot</h2>
+          <h2 className={`text-lg font-bold ${colors.text}`}>Risk Snapshot</h2>
           <button
             onClick={onClose}
             className="p-1 hover:bg-white/50 rounded-lg transition-colors"

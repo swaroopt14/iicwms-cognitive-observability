@@ -9,7 +9,6 @@ import {
   Shield,
   Network,
   Lightbulb,
-  TrendingUp,
   DollarSign,
   Database,
   Cloud,
@@ -39,7 +38,6 @@ const navGroups = [
       { href: '/anomaly-center', label: 'Anomaly Center', icon: AlertTriangle },
       { href: '/compliance', label: 'Compliance Intel', icon: Shield },
       { href: '/causal-analysis', label: 'Causal Analysis', icon: Network },
-      { href: '/system-graph', label: 'Risk Index', icon: TrendingUp },
     ],
   },
   {
@@ -70,7 +68,6 @@ const agents = [
   { name: 'Workflow', color: '#6366f1' },
   { name: 'Resource', color: '#10b981' },
   { name: 'Compliance', color: '#ef4444' },
-  { name: 'Risk', color: '#f59e0b' },
   { name: 'Causal', color: '#8b5cf6' },
   { name: 'Query', color: '#3b82f6' },
   { name: 'Baseline', color: '#06b6d4' },

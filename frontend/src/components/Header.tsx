@@ -14,7 +14,6 @@ const pageTitles: Record<string, string> = {
   '/causal-analysis': 'Causal Analysis',
   '/insight-feed': 'Insight Feed',
   '/search': 'Ask Chronos AI',
-  '/system-graph': 'Risk Index',
   '/scenarios': 'Scenario Lab',
   '/audit': 'Audit Investigation',
 };

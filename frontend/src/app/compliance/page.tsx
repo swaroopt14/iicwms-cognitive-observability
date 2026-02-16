@@ -170,9 +170,6 @@ function ViolationDrawer({ violation, onClose }: { violation: PolicyViolation; o
               <ExternalLink className="w-4 h-4" />
               View Causal Analysis
             </button>
-            <button className="btn btn-secondary w-full" onClick={() => { onClose(); window.location.href = '/system-graph'; }}>
-              Jump to System Graph
-            </button>
             <button className="btn btn-secondary w-full" onClick={() => {
               const blob = new Blob([JSON.stringify({ violation, snapshot_time: new Date().toISOString() }, null, 2)], { type: 'application/json' });
               const url = URL.createObjectURL(blob);

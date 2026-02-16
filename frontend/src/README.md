@@ -19,7 +19,6 @@ A 10-page intelligence dashboard that visualizes multi-agent reasoning with evid
 | 7 | **Insight Feed** | `/insight-feed` | What are the most important findings? |
 | 8 | **Ask Chronos AI** | `/search` | Why did this happen? What to do? |
 | 9 | **Scenario Lab** | `/scenarios` | How does the system respond to disruptions? |
-| 10 | **System Risk Index** | `/system-graph` | What is the overall risk trajectory? |
 
 ## Components
 

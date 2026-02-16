@@ -563,10 +563,6 @@ function ExecutionDetailDrawer({ execution, onClose, onNavigate }: { execution: 
               <Network className="w-4 h-4" />
               View Causal Analysis
             </button>
-            <button className="btn btn-secondary w-full" onClick={() => onNavigate('/system-graph')}>
-              <TrendingUp className="w-4 h-4" />
-              Jump to System Graph
-            </button>
           </div>
         </div>
       </div>

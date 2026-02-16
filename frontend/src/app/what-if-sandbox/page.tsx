@@ -267,7 +267,7 @@ export default function WhatIfSandboxPage() {
             <div className="text-xs font-semibold text-[var(--color-text-muted)] uppercase mb-2">Delta</div>
             <div className="space-y-2 text-sm">
               <div className="flex items-center justify-between">
-                <span className="text-[var(--color-text-muted)] inline-flex items-center gap-1"><TrendingUp className="w-3.5 h-3.5" /> Risk Index</span>
+                <span className="text-[var(--color-text-muted)] inline-flex items-center gap-1"><TrendingUp className="w-3.5 h-3.5" /> Risk Score</span>
                 <span className="font-semibold">{Math.round(result.baseline.risk_index)} → {Math.round(result.simulated.risk_index)} ({result.simulated.projected_state})</span>
               </div>
               <div className="flex items-center justify-between">

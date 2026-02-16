@@ -16,7 +16,6 @@ import {
   FileText,
   GitMerge,
   Activity,
-  Network,
   ArrowRight,
   CheckCircle,
   Shield,
@@ -395,10 +394,6 @@ function AnomalyDetailModal({
               <button className="btn btn-secondary w-full" onClick={onViewEvidence}>
                 <FileText className="w-4 h-4" />
                 View Evidence Chain
-              </button>
-              <button className="btn btn-secondary w-full" onClick={() => onNavigate('/system-graph')}>
-                <Network className="w-4 h-4" />
-                Jump to System Graph
               </button>
             </div>
           </div>

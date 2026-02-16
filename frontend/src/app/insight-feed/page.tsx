@@ -179,10 +179,6 @@ function InsightDetailDrawer({ insight, onClose, onNavigate }: { insight: Insigh
               <Zap className="w-4 h-4" />
               View Related Anomalies
             </button>
-            <button className="btn btn-secondary w-full" onClick={() => onNavigate('/system-graph')}>
-              <Network className="w-4 h-4" />
-              Jump to System Graph
-            </button>
           </div>
         </div>
       </div>

@@ -775,10 +775,6 @@ function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: Cau
               <ExternalLink className="w-4 h-4" />
               Jump to Workflow Timeline
             </button>
-            <button className="btn btn-secondary w-full" onClick={() => onNavigate('/system-graph')}>
-              <Network className="w-4 h-4" />
-              Jump to System Graph
-            </button>
           </div>
         </div>
       </div>
