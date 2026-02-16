@@ -33,7 +33,8 @@ class Settings:
     API_PREFIX: str = ""  # Set to "/api/v1" for versioned routing
 
     # ── Reasoning Loop ──────────────────────────────────────────
-    CYCLE_INTERVAL_SECONDS: float = 5.0
+    # Default 15s is a safer baseline for local/dev. For demos you can set 5s in `.env`.
+    CYCLE_INTERVAL_SECONDS: float = 15.0
     MAX_INSIGHTS_BUFFER: int = 100
     MAX_CYCLE_HISTORY: int = 200
 

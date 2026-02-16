@@ -286,6 +286,18 @@ class CausalLinkResponse(BaseModel):
     reasoning: str
 
 
+class IndustryIncidentBrief(BaseModel):
+    generated_at: str
+    cycle_id: Optional[str]
+    risk_state: str
+    risk_score: float
+    top_change: Dict[str, Any]
+    impacted_workflows: List[Dict[str, Any]]
+    policy_exposure: Dict[str, Any]
+    business_impact: Dict[str, Any]
+    top_recommendation: Dict[str, Any]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE — Application-scoped singletons
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1137,6 +1149,134 @@ async def get_insight(insight_id: str):
             }
     
     raise HTTPException(status_code=404, detail="Insight not found")
+
+
+@app.get("/industry/incident-brief", response_model=IndustryIncidentBrief, tags=["Insights"])
+async def get_industry_incident_brief():
+    """
+    Correlate latest change signals with runtime impact in one structured incident brief.
+    """
+    generated_at = datetime.utcnow().isoformat()
+    latest_cycle = _state._completed_cycles[-1] if _state and _state._completed_cycles else None
+    events = _observation.get_recent_events(500) if _observation else []
+    metrics = _observation.get_recent_metrics(500) if _observation else []
+
+    gh_events = []
+    for e in events:
+        md = e.metadata if isinstance(e.metadata, dict) else {}
+        sig = md.get("source_signature", {}) if isinstance(md, dict) else {}
+        if isinstance(sig, dict) and str(sig.get("tool_name", "")).lower() == "github":
+            gh_events.append(e)
+    gh_events.sort(key=lambda e: e.timestamp, reverse=True)
+
+    top_change: Dict[str, Any] = {
+        "change_type": "unknown",
+        "repository": None,
+        "deployment_id": None,
+        "pr_number": None,
+        "event_id": None,
+        "timestamp": None,
+    }
+    if gh_events:
+        e = gh_events[0]
+        md = e.metadata if isinstance(e.metadata, dict) else {}
+        gh = md.get("github", {}) if isinstance(md, dict) else {}
+        payload = md.get("event_payload", {}) if isinstance(md, dict) else {}
+        pr = payload.get("pull_request", {}) if isinstance(payload, dict) else {}
+        top_change = {
+            "change_type": e.type,
+            "repository": gh.get("repo"),
+            "deployment_id": gh.get("deployment_id"),
+            "pr_number": gh.get("pr_number") or pr.get("number"),
+            "event_id": e.event_id,
+            "timestamp": e.timestamp.isoformat(),
+        }
+
+    impacted_workflows: List[Dict[str, Any]] = []
+    policy_exposure: Dict[str, Any] = {"total_policy_hits": 0, "top_policies": []}
+    top_recommendation: Dict[str, Any] = {
+        "action": "Investigate latest high-confidence anomaly",
+        "urgency": "MEDIUM",
+        "source": "fallback",
+    }
+    if latest_cycle:
+        wf_anoms = [a for a in latest_cycle.anomalies if a.type in ("WORKFLOW_DELAY", "MISSING_STEP", "SEQUENCE_VIOLATION")]
+        by_wf: Dict[str, Dict[str, Any]] = {}
+        for a in wf_anoms:
+            wf = "wf_unknown"
+            if a.evidence:
+                ev = a.evidence[0]
+                if isinstance(ev, str) and ev.startswith("wf_"):
+                    wf = ev
+            if wf not in by_wf:
+                by_wf[wf] = {"workflow_id": wf, "anomaly_count": 0, "anomaly_types": set(), "confidence": 0.0}
+            by_wf[wf]["anomaly_count"] += 1
+            by_wf[wf]["anomaly_types"].add(a.type)
+            by_wf[wf]["confidence"] = max(by_wf[wf]["confidence"], float(a.confidence))
+        impacted_workflows = [
+            {
+                "workflow_id": row["workflow_id"],
+                "anomaly_count": row["anomaly_count"],
+                "anomaly_types": sorted(list(row["anomaly_types"])),
+                "confidence": round(row["confidence"], 3),
+            }
+            for row in by_wf.values()
+        ]
+        impacted_workflows.sort(key=lambda x: (x["anomaly_count"], x["confidence"]), reverse=True)
+
+        counts: Dict[str, int] = {}
+        for h in latest_cycle.policy_hits:
+            counts[h.policy_id] = counts.get(h.policy_id, 0) + 1
+        policy_exposure = {
+            "total_policy_hits": len(latest_cycle.policy_hits),
+            "top_policies": [{"policy_id": p, "hits": c} for p, c in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:5]],
+        }
+
+        if latest_cycle.recommendations_v2:
+            r = latest_cycle.recommendations_v2[0]
+            top_recommendation = {
+                "action": r.action_description,
+                "urgency": "HIGH" if r.severity_score >= 7 else "MEDIUM",
+                "confidence": r.confidence,
+                "source": r.rule_id,
+            }
+        elif latest_cycle.recommendations:
+            r = latest_cycle.recommendations[0]
+            top_recommendation = {
+                "action": r.action,
+                "urgency": r.urgency,
+                "source": "master_map",
+            }
+
+    revenue_metric_values = [m.value for m in metrics if m.metric == "estimated_revenue_impact_inr"]
+    cart_abandon = [m.value for m in metrics if m.metric == "cart_abandon_rate"]
+    business_impact = {
+        "estimated_revenue_impact_inr": round(float(max(revenue_metric_values)), 2) if revenue_metric_values else 0.0,
+        "cart_abandon_rate": round(float(max(cart_abandon)), 2) if cart_abandon else None,
+        "impact_source": "metrics+correlation" if revenue_metric_values else "proxy_only",
+    }
+
+    risk_score = 20.0
+    risk_state = "NORMAL"
+    try:
+        current = get_risk_tracker().get_current_risk()
+        if current:
+            risk_score = float(current.risk_score)
+            risk_state = str(current.risk_state)
+    except Exception:
+        pass
+
+    return IndustryIncidentBrief(
+        generated_at=generated_at,
+        cycle_id=latest_cycle.cycle_id if latest_cycle else None,
+        risk_state=risk_state,
+        risk_score=round(risk_score, 2),
+        top_change=top_change,
+        impacted_workflows=impacted_workflows[:5],
+        policy_exposure=policy_exposure,
+        business_impact=business_impact,
+        top_recommendation=top_recommendation,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2801,7 +2941,7 @@ async def list_agents():
                 "name": "ScenarioInjectionAgent",
                 "type": "specialized",
                 "role": "Stress Testing & Scenario Injection",
-                "detects": ["5 scenarios: latency, compliance, workload, cascade, drift"],
+                "detects": ["6 scenarios: latency, compliance, workload, cascade, drift, paytm_hotfix_fail"],
                 "ps08_feature": "System Stress / Scenario Injection (R2)",
             },
             {

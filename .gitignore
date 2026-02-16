@@ -16,6 +16,10 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/src/lib/
+!frontend/src/lib/api.ts
+!frontend/src/lib/mock-data.ts
+!frontend/src/lib/utils.ts
 lib64/
 parts/
 sdist/
@@ -67,6 +71,7 @@ blackboard/evidence_log.jsonl
 # Generated files
 events.jsonl
 *.jsonl
+!scenarios/paytm_hotfix_fail.jsonl
 
 # Local DB / runtime state
 data/
