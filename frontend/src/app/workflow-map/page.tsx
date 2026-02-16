@@ -78,6 +78,86 @@ interface WorkflowOption {
   issueCategory: string;
 }
 
+const REQUIRED_WORKFLOWS: Omit<WorkflowOption, 'status'>[] = [
+  {
+    id: 'wf_policy_compliance_monitoring',
+    label: 'Policy Compliance Monitoring',
+    projectId: 'proj_compliance',
+    projectName: 'Governance & Compliance',
+    environment: 'production',
+    contextTag: 'compliance_governance',
+    inputSource: 'system_internal',
+    issueCategory: 'compliance_or_data_risk',
+  },
+  {
+    id: 'wf_security_posture_assessment',
+    label: 'Security Posture Assessment',
+    projectId: 'proj_secops',
+    projectName: 'Security Operations',
+    environment: 'production',
+    contextTag: 'security_posture',
+    inputSource: 'system_internal',
+    issueCategory: 'compliance_or_data_risk',
+  },
+  {
+    id: 'wf_resource_utilization_cost_optimization',
+    label: 'Resource Utilization & Cost Optimization',
+    projectId: 'proj_infra_efficiency',
+    projectName: 'Infrastructure Efficiency',
+    environment: 'production',
+    contextTag: 'resource_cost',
+    inputSource: 'server_failure',
+    issueCategory: 'server_failure',
+  },
+  {
+    id: 'wf_change_risk_analysis',
+    label: 'Change Risk Analysis',
+    projectId: 'proj_release_risk',
+    projectName: 'Release Engineering',
+    environment: 'production',
+    contextTag: 'change_risk',
+    inputSource: 'github',
+    issueCategory: 'deployment_pipeline',
+  },
+  {
+    id: 'wf_incident_response_alert_correlation',
+    label: 'Incident Response & Alert Correlation',
+    projectId: 'proj_incident_ops',
+    projectName: 'SRE Incident Management',
+    environment: 'production',
+    contextTag: 'incident_management',
+    inputSource: 'server_failure',
+    issueCategory: 'server_failure',
+  },
+  {
+    id: 'wf_api_service_performance_monitoring',
+    label: 'API & Service Performance Monitoring',
+    projectId: 'proj_api_perf',
+    projectName: 'Service Reliability',
+    environment: 'production',
+    contextTag: 'api_performance',
+    inputSource: 'client_side',
+    issueCategory: 'client_side_error',
+  },
+];
+
+function mergeRequiredWorkflows(input: WorkflowOption[]): WorkflowOption[] {
+  const filtered = input.filter((w) => w.label.trim().toLowerCase() !== 'expense reimbursement');
+  const byLabel = new Map(filtered.map((w) => [w.label.trim().toLowerCase(), w]));
+
+  for (const req of REQUIRED_WORKFLOWS) {
+    const key = req.label.toLowerCase();
+    if (!byLabel.has(key)) {
+      filtered.push({
+        ...req,
+        status: 'active',
+      });
+    }
+  }
+
+  return filtered;
+}
+
 type TimeRangePreset = '5m' | '15m' | '1h' | '6h' | '24h';
 
 // ============================================
@@ -1051,8 +1131,9 @@ export default function WorkflowMapPage() {
             };
           })
           .filter((w) => Boolean(w.id));
-        if (mounted && mapped.length > 0) {
-          setWorkflows(mapped);
+        const normalized = mergeRequiredWorkflows(mapped);
+        if (mounted && normalized.length > 0) {
+          setWorkflows(normalized);
         }
       } catch {
         // keep previous values
