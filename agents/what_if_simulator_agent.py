@@ -13,6 +13,13 @@ from blackboard import SharedState, ScenarioRun, RiskState
 
 class WhatIfSimulatorAgent:
     AGENT_NAME = "WhatIfSimulatorAgent"
+    _RISK_STATE_RANK = {
+        RiskState.NORMAL: 0,
+        RiskState.DEGRADED: 25,
+        RiskState.AT_RISK: 55,
+        RiskState.VIOLATION: 80,
+        RiskState.INCIDENT: 95,
+    }
 
     _SCENARIO_DEFAULTS = {
         "LATENCY_SPIKE": {"magnitude": 0.5, "duration_minutes": 15},
@@ -29,36 +36,44 @@ class WhatIfSimulatorAgent:
         scenario = scenario_type.upper()
         defaults = dict(self._SCENARIO_DEFAULTS.get(scenario, {}))
         defaults.update(parameters or {})
-        p = defaults
+        p = self._normalize_parameters(defaults)
 
         baseline = self._baseline_metrics(state)
         simulated = dict(baseline)
+        explain_trace: List[str] = []
 
         if scenario == "LATENCY_SPIKE":
             magnitude = float(p.get("magnitude", 0.5))
             simulated["sla_violations"] += max(1.0, 4.0 * magnitude)
             simulated["compliance_violations"] += max(0.0, 1.0 * magnitude)
             simulated["risk_index"] = min(100.0, baseline["risk_index"] + 25.0 * magnitude)
+            explain_trace.append(f"LATENCY_SPIKE magnitude {magnitude:.2f} -> risk +{25.0 * magnitude:.2f}")
         elif scenario == "WORKLOAD_SURGE":
             mult = float(p.get("multiplier", 2.0))
             simulated["sla_violations"] += max(1.0, (mult - 1.0) * 6.0)
             simulated["compliance_violations"] += max(0.0, (mult - 1.0) * 1.5)
             simulated["risk_index"] = min(100.0, baseline["risk_index"] + (mult - 1.0) * 18.0)
+            explain_trace.append(f"WORKLOAD_SURGE multiplier {mult:.2f} -> risk +{(mult - 1.0) * 18.0:.2f}")
         elif scenario == "COMPLIANCE_RELAX":
             ext = float(p.get("minutes_extension", 180))
             simulated["sla_violations"] += 0.5
             simulated["compliance_violations"] += min(6.0, ext / 90.0)
             simulated["risk_index"] = min(100.0, baseline["risk_index"] + min(20.0, ext / 18.0))
+            explain_trace.append(f"COMPLIANCE_RELAX extension {ext:.0f}m -> risk +{min(20.0, ext / 18.0):.2f}")
         else:
             # Unknown scenario: conservative small perturbation only.
             simulated["sla_violations"] += 0.5
             simulated["risk_index"] = min(100.0, baseline["risk_index"] + 5.0)
+            explain_trace.append("UNKNOWN scenario fallback -> risk +5.00")
+
+        self._apply_context_modifiers(simulated, p, explain_trace)
 
         impact = self._impact_score(baseline, simulated)
         assumptions = [
             "Read-only simulation: no writes to Observation layer",
             "Uses deterministic rules; not probabilistic forecasting",
             "Impact is delta vs latest observed baseline",
+            *explain_trace[:5],
         ]
         confidence, reason = self._confidence(scenario, p)
 
@@ -84,15 +99,8 @@ class WhatIfSimulatorAgent:
         comp_viol = float(len(latest.policy_hits))
 
         max_rank = 0
-        rank = {
-            RiskState.NORMAL: 0,
-            RiskState.DEGRADED: 25,
-            RiskState.AT_RISK: 55,
-            RiskState.VIOLATION: 80,
-            RiskState.INCIDENT: 95,
-        }
         for r in latest.risk_signals:
-            max_rank = max(max_rank, rank.get(r.projected_state, 0))
+            max_rank = max(max_rank, self._RISK_STATE_RANK.get(r.projected_state, 0))
 
         return {
             "sla_violations": sla_viol,
@@ -119,3 +127,32 @@ class WhatIfSimulatorAgent:
             return 0.7, "High latency perturbation, medium model confidence"
         return 0.9, "Within modeled operating envelope"
 
+    def _normalize_parameters(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        p = dict(parameters)
+        p["magnitude"] = max(0.0, min(2.0, float(p.get("magnitude", 0.5))))
+        p["multiplier"] = max(1.0, min(6.0, float(p.get("multiplier", 2.0))))
+        p["minutes_extension"] = max(0.0, min(720.0, float(p.get("minutes_extension", 180.0))))
+        p["time_window"] = str(p.get("time_window", "business_hours")).lower()
+        p["affected_module"] = str(p.get("affected_module", "general")).lower()
+        p["actor_role"] = str(p.get("actor_role", "service")).lower()
+        return p
+
+    def _apply_context_modifiers(self, simulated: Dict[str, float], p: Dict[str, Any], trace: List[str]) -> None:
+        risk_boost = 0.0
+
+        if p.get("time_window") in ("after_hours", "weekend"):
+            risk_boost += 4.0
+            trace.append("Context time_window after_hours/weekend -> risk +4.00")
+
+        module = str(p.get("affected_module", "general"))
+        if module in ("auth", "payment", "approval", "compliance"):
+            risk_boost += 6.0
+            simulated["compliance_violations"] += 0.6
+            trace.append(f"Context affected_module {module} -> risk +6.00")
+
+        role = str(p.get("actor_role", "service"))
+        if role in ("admin", "security"):
+            risk_boost += 3.0
+            trace.append(f"Context actor_role {role} -> risk +3.00")
+
+        simulated["risk_index"] = min(100.0, simulated["risk_index"] + risk_boost)

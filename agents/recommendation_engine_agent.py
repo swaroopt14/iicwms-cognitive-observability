@@ -117,6 +117,15 @@ class RecommendationEngineAgent:
             base_confidence=0.76,
         ),
     ]
+    _RULES_BY_ISSUE: Dict[str, List[RecommendationRule]] = {}
+
+    def __init__(self):
+        # Cache issue-type -> rules mapping once for faster lookups on each cycle.
+        if not self._RULES_BY_ISSUE:
+            by_issue: Dict[str, List[RecommendationRule]] = {}
+            for rule in self._RULES:
+                by_issue.setdefault(rule.issue_type, []).append(rule)
+            self.__class__._RULES_BY_ISSUE = by_issue
 
     def generate(
         self,
@@ -203,10 +212,11 @@ class RecommendationEngineAgent:
                 )
                 outputs.append(rec)
 
+        outputs.sort(key=lambda r: (r.severity_score, r.confidence), reverse=True)
         return outputs
 
     def _rules_for_issue(self, issue_type: str) -> List[RecommendationRule]:
-        return [r for r in self._RULES if r.issue_type == issue_type]
+        return self._RULES_BY_ISSUE.get(issue_type, [])
 
     def _entity_from_anomaly(self, anomaly: Anomaly) -> str:
         if anomaly.evidence:

@@ -422,7 +422,7 @@ export default function OverviewPage() {
                 </div>
                 <div>
                   <h3 className="chart-title">System Health Trend</h3>
-                  <p className="chart-subtitle">Risk index trajectory (stock-style)</p>
+                  <p className="chart-subtitle">Risk index trajectory</p>
                 </div>
               </div>
               <div className="badge badge-warning">

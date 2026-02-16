@@ -2378,7 +2378,7 @@ async def run_what_if_simulation(request: WhatIfRequest):
 @app.get("/simulation/runs", tags=["Simulation"])
 async def list_simulation_runs(limit: int = Query(default=20, ge=1, le=200)):
     runs = []
-    for cycle in reversed(_state._completed_cycles):
+    for cycle in _state.get_recent_cycles_desc(count=limit * 3):
         for run in cycle.scenario_runs:
             runs.append({
                 "scenario_id": run.scenario_id,
@@ -2397,7 +2397,7 @@ async def list_simulation_runs(limit: int = Query(default=20, ge=1, le=200)):
 @app.get("/severity/latest", tags=["Risk"])
 async def get_latest_severity(limit: int = Query(default=50, ge=1, le=500)):
     scores = []
-    for cycle in reversed(_state._completed_cycles):
+    for cycle in _state.get_recent_cycles_desc(count=limit * 3):
         for s in cycle.severity_scores:
             scores.append({
                 "severity_id": s.severity_id,
@@ -2449,7 +2449,7 @@ async def get_severity_by_cycle(cycle_id: str):
 @app.get("/recommendations/latest", tags=["Insights"])
 async def get_latest_recommendations(limit: int = Query(default=50, ge=1, le=500)):
     recs = []
-    for cycle in reversed(_state._completed_cycles):
+    for cycle in _state.get_recent_cycles_desc(count=limit * 3):
         for r in cycle.recommendations_v2:
             recs.append({
                 "rec_id": r.rec_id,
