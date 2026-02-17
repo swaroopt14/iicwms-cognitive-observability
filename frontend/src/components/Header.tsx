@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback, type ReactNode } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { Search, Bell, Sparkles, Command, AlertCircle, AlertTriangle, Info, CheckCircle } from 'lucide-react';
 
@@ -11,7 +11,7 @@ const pageTitles: Record<string, string> = {
   '/anomaly-center': 'Anomaly Center',
   '/compliance': 'Compliance Intel',
   '/resource-cost': 'Resource & Cost',
-  '/causal-analysis': 'Causal Analysis',
+  '/causal-analysis': 'Root Cause Explorer',
   '/insight-feed': 'Insight Feed',
   '/search': 'Ask Chronos AI',
   '/scenarios': 'Scenario Lab',
@@ -19,7 +19,19 @@ const pageTitles: Record<string, string> = {
 };
 
 // Severity colors and configurations
-const severityConfig: Record<string, { borderColor: string; bgColor: string; textColor: string; icon: React.ReactNode }> = {
+type NotificationType = 'alert' | 'warning' | 'info' | 'success';
+
+type Notification = {
+  id: number;
+  title: string;
+  message: string;
+  timestamp: string;
+  type: NotificationType;
+  route?: string;
+  read: boolean;
+};
+
+const severityConfig: Record<NotificationType, { borderColor: string; bgColor: string; textColor: string; icon: ReactNode }> = {
   'alert': { 
     borderColor: 'border-l-4 border-l-red-500', 
     bgColor: 'hover:bg-red-50', 
@@ -47,23 +59,21 @@ const severityConfig: Record<string, { borderColor: string; bgColor: string; tex
 };
 
 // Utility function to group notifications by type
-const groupNotificationsByType = (notifications: any[]) => {
-  const grouped: Record<string, any[]> = {
+const groupNotificationsByType = (notifications: Notification[]): Notification[] => {
+  const grouped: Record<NotificationType, Notification[]> = {
     alert: [],
     warning: [],
     info: [],
     success: [],
   };
 
-  notifications.forEach(notification => {
-    const type = notification.type || 'info';
-    if (!grouped[type]) grouped[type] = [];
-    grouped[type].push(notification);
+  notifications.forEach((notification) => {
+    grouped[notification.type ?? 'info'].push(notification);
   });
 
   return Object.entries(grouped)
     .filter(([_, items]) => items.length > 0)
-    .flatMap(([type, items]) => items);
+    .flatMap(([_type, items]) => items);
 };
 
 export default function Header() {
@@ -72,15 +82,15 @@ export default function Header() {
   const [searchQuery, setSearchQuery] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-  const unreadNotifications = 3;
 
   // Example notifications (replace with dynamic data / API)
-  const [notifications, setNotifications] = useState(() => [
+  const [notifications, setNotifications] = useState<Notification[]>(() => [
     { id: 1, title: 'Critical Alert', message: 'High CPU usage detected', timestamp: '2 minutes ago', type: 'alert', route: '/anomaly-center', read: false },
     { id: 2, title: 'Resource Warning', message: 'Database disk space low', timestamp: '15 minutes ago', type: 'warning', route: '/resource-cost', read: false },
     { id: 3, title: 'Compliance Issue', message: 'New security policy update', timestamp: '1 hour ago', type: 'info', route: '/compliance', read: false },
     { id: 4, title: 'Deployment Success', message: 'New version deployed successfully', timestamp: '2 hours ago', type: 'success', route: '/audit', read: true },
   ]);
+  const unreadNotifications = notifications.filter((n) => !n.read).length;
 
   const currentPage = pageTitles[pathname] || 'Overview';
   const groupedNotifications = groupNotificationsByType(notifications);

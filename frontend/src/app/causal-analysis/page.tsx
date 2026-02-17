@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { fetchCausalLinks, fetchWorkflows, type CausalLink } from '@/lib/api';
 import { formatTime } from '@/lib/utils';
-import { DonutChart, Sparkline } from '@/components/Charts';
+import { DonutChart } from '@/components/Charts';
 
 // Helper: shorten a node label like "NETWORK_LATENCY_SPIKE (vm_api_01)" → "NET LATENCY\nvm_api_01"
 function shortenLabel(raw: string): string[] {
@@ -523,14 +523,6 @@ function SnapshotModal({ link, allLinks, onClose }: { link: CausalLink; allLinks
 function InsightDetailPanel({ link, allLinks, onClose, onNavigate }: { link: CausalLink; allLinks: CausalLink[]; onClose: () => void; onNavigate: (path: string) => void }) {
   const [showSnapshot, setShowSnapshot] = useState(false);
   const confidenceColor = link.confidence > 70 ? '#10b981' : link.confidence > 40 ? '#f59e0b' : '#ef4444';
-  const trendData = useMemo(() => {
-    const similar = allLinks
-      .filter((l) => l.cause === link.cause && l.effect === link.effect)
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-      .map((l) => l.confidence);
-    if (similar.length >= 2) return similar.slice(-8);
-    return Array.from({ length: 8 }, (_, i) => Math.max(0, Math.min(100, link.confidence - (7 - i) * 2)));
-  }, [allLinks, link.cause, link.effect, link.confidence]);
 
   // Impact analysis data
   const impactAnalysis = {
@@ -814,19 +806,17 @@ export default function CausalAnalysisPage() {
     });
     return Array.from(ids).sort();
   }, [displayLinks, workflows]);
-
-  useEffect(() => {
-    if (selectedWorkflow !== 'all' && !workflowIds.includes(selectedWorkflow)) {
-      setSelectedWorkflow('all');
-    }
+  const effectiveWorkflow = useMemo(() => {
+    if (selectedWorkflow === 'all') return 'all';
+    return workflowIds.includes(selectedWorkflow) ? selectedWorkflow : 'all';
   }, [selectedWorkflow, workflowIds]);
 
   const filteredLinks = useMemo(() => {
-    if (selectedWorkflow === 'all') return displayLinks;
+    if (effectiveWorkflow === 'all') return displayLinks;
     return displayLinks.filter(
-      (l) => l.cause.includes(selectedWorkflow) || l.effect.includes(selectedWorkflow)
+      (l) => l.cause.includes(effectiveWorkflow) || l.effect.includes(effectiveWorkflow)
     );
-  }, [displayLinks, selectedWorkflow]);
+  }, [displayLinks, effectiveWorkflow]);
 
   // Summary stats
   const uniqueNodes = new Set(filteredLinks.flatMap(l => [l.cause, l.effect])).size;
@@ -850,7 +840,7 @@ export default function CausalAnalysisPage() {
           <label className="text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">Workflow</label>
           <select
             className="input w-[220px]"
-            value={selectedWorkflow}
+            value={effectiveWorkflow}
             onChange={(e) => {
               setSelectedWorkflow(e.target.value);
               setSelectedLink(null);
