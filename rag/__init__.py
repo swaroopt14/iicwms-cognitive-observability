@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .vector_store import ChronosVectorStore, VectorDocument
 
-__all__ = ["get_rag_engine"]
+__all__ = ["get_rag_engine", "force_refresh_rag_engine"]
 
 try:
     from .vector_store import ChronosVectorStore, VectorDocument
@@ -25,7 +25,16 @@ def get_rag_engine():
     from blackboard import get_shared_state
     from observation import get_observation_layer
     
-    # Singleton pattern
+    # Singleton pattern with force refresh capability
+    if hasattr(get_rag_engine, '_instance') and hasattr(get_rag_engine, '_force_refresh'):
+        # Force recreation when requested
+        delattr(get_rag_engine, '_instance')
+        delattr(get_rag_engine, '_force_refresh')
+    
     if not hasattr(get_rag_engine, '_instance'):
         get_rag_engine._instance = AgenticRAGEngine()
     return get_rag_engine._instance
+    
+def force_refresh_rag_engine():
+    """Force refresh of RAG engine singleton on next call."""
+    setattr(get_rag_engine, '_force_refresh', True)
