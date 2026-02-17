@@ -12,12 +12,15 @@ Goals:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from blackboard import ReasoningCycle, SharedState, get_shared_state
 from observation import ObservationLayer, get_observation_layer
@@ -252,6 +255,27 @@ class ReasoningSynthesizer:
         self._observation = observation
         enable_vector = os.getenv("ENABLE_VECTOR_STORE", "false").lower().strip() == "true"
         self._vector_store = ChronosVectorStore() if (ChronosVectorStore and enable_vector) else None
+        # Initialize LLM for dynamic synthesis
+        self._llm = self._init_llm()
+    
+    def _init_llm(self):
+        """Initialize the LLM for dynamic synthesis."""
+        from dotenv import load_dotenv
+        load_dotenv()
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=api_key)
+                llm = genai.GenerativeModel("gemini-2.5-flash")
+                logger.info("LLM initialized for dynamic synthesis")
+                return llm
+            except ImportError:
+                logger.warning("google.generativeai not available, LLM synthesis disabled")
+                return None
+        else:
+            logger.info("No GEMINI_API_KEY found, LLM synthesis disabled")
+            return None
 
     def retrieve_evidence(
         self,
@@ -437,23 +461,117 @@ class ReasoningSynthesizer:
         evidence: List[Evidence],
         cycles: List[ReasoningCycle],
     ) -> str:
+        """Use dynamic LLM synthesis instead of deterministic rules."""
         if not evidence and not cycles:
             return "No data available yet. Run one analysis cycle or simulation, then ask again."
 
-        qtype = decomposition.query_type
-        if qtype == QueryType.RISK_STATUS:
-            return self._risk_answer(evidence, cycles)
-        if qtype == QueryType.CAUSAL_ANALYSIS:
-            return self._causal_answer(evidence)
-        if qtype == QueryType.COMPLIANCE_CHECK:
-            return self._compliance_answer(evidence)
-        if qtype == QueryType.WORKFLOW_HEALTH:
-            return self._workflow_answer(evidence)
-        if qtype == QueryType.RESOURCE_STATUS:
-            return self._resource_answer(evidence)
-        if qtype == QueryType.PREDICTION:
-            return self._prediction_answer(evidence)
-        return self._general_answer(evidence, cycles)
+        # Build dynamic prompt for LLM
+        dynamic_prompt = self._build_dynamic_prompt(decomposition.original_query, evidence, cycles)
+        
+        # Use LLM for dynamic synthesis
+        return self._synthesize_dynamic_answer(dynamic_prompt, evidence)
+    
+    def _build_dynamic_prompt(self, query: str, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
+        """Build a comprehensive prompt that lets the LLM reason dynamically over all context."""
+        
+        # Build evidence summary
+        evidence_summary = ""
+        for i, ev in enumerate(evidence[:15], 1):
+            evidence_summary += f"{i}. [{ev.type.upper()}] {ev.summary} (confidence: {ev.confidence:.0f}%, source: {ev.source_agent})\n"
+        
+        # Build system state summary
+        system_state = ""
+        if cycles:
+            latest_cycle = cycles[-1]
+            system_state += f"""
+Current System State (Latest Cycle):
+- Anomalies: {len(latest_cycle.anomalies)}
+- Policy Hits: {len(latest_cycle.policy_hits)}
+- Risk Signals: {len(latest_cycle.risk_signals)}
+- Recommendations: {len(latest_cycle.recommendations_v2 or latest_cycle.recommendations)}
+- Cycle Status: {'Active' if latest_cycle.completed_at else 'In Progress'}
+"""
+        
+        # Dynamic prompt that lets LLM reason
+        dynamic_prompt = f"""
+You are Chronos AI, an intelligent observability assistant. Analyze the following query with all available context.
+
+USER QUERY: {query}
+
+{system_state}
+
+EVIDENCE:
+{evidence_summary}
+
+ANALYSIS INSTRUCTIONS:
+1. Analyze the user's query in the context of current system state and evidence
+2. Identify the most relevant evidence items and their relationships
+3. Consider the system metrics and historical trends
+4. Provide a specific, evidence-based answer
+5. Explain why this matters for the current situation
+6. Identify any causal relationships or patterns
+7. Suggest specific actions based on the evidence
+
+RESPONSE FORMAT:
+Answer: [Your specific answer based on evidence]
+
+Why It Matters:
+- [Point 1]
+- [Point 2] 
+- [Point 3]
+
+Supporting Evidence:
+- [Evidence ID] [Type] [Summary] [Confidence]
+
+Causal Chain:
+- [Step 1] → [Step 2] → [Step 3]
+
+Recommended Actions:
+- [Action 1] (Expected impact: [impact], Priority: [high/medium/low])
+- [Action 2] (Expected impact: [impact], Priority: [high/medium/low])
+
+Time Horizon: [estimated timeframe]
+Uncertainty: [confidence level in analysis]
+
+IMPORTANT: Base your entire response ONLY on the provided evidence and context. Do not invent information.
+"""
+        
+        return dynamic_prompt
+
+    def _synthesize_dynamic_answer(self, prompt: str, evidence: List[Evidence]) -> str:
+        """Let the LLM synthesize a dynamic answer from the comprehensive prompt."""
+        try:
+            # Use the LLM directly to generate response
+            if hasattr(self, '_llm') and self._llm:
+                # Generate with shorter response to avoid token limits
+                response = self._llm.generate_content(
+                    prompt, 
+                    generation_config={
+                        "max_output_tokens": 1000,  # Limit tokens
+                        "temperature": 0.7,  # More focused responses
+                    }
+                )
+                # Handle different response formats
+                if hasattr(response, 'text'):
+                    return response.text
+                elif hasattr(response, 'content'):
+                    return response.content
+                elif hasattr(response, 'result'):
+                    result = response.result
+                    if hasattr(result, 'text'):
+                        return result.text
+                    else:
+                        return str(result)
+                else:
+                    return str(response)
+            else:
+                return "Unable to generate dynamic response - LLM not available."
+        except Exception as e:
+            logger.warning(f"Dynamic synthesis failed: {e}")
+            # Check if it's a quota error and provide helpful message
+            if "quota" in str(e).lower() or "429" in str(e):
+                return "API quota exceeded. The dynamic LLM is temporarily unavailable. Please try again later or upgrade your Gemini API plan for higher quotas."
+            return "Error generating dynamic response. Please try again."
 
     def _risk_answer(self, evidence: List[Evidence], cycles: List[ReasoningCycle]) -> str:
         risks = [e for e in evidence if e.type == "risk_signal"]

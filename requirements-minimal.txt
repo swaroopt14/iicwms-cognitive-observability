@@ -1,0 +1,11 @@
+# Minimal requirements for Chronos AI - Prompt-based RAG only
+# Core dependencies only - no CrewAI, no transformers, no langchain
+
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+python-dotenv==1.0.1
+google-generativeai==0.8.6
+
+# Optional: If you want vector store functionality
+# sentence-transformers==2.8.2
+# chromadb==0.5.29
