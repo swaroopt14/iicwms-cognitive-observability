@@ -189,7 +189,7 @@ export default function OverviewPage() {
   const displayRiskData = riskData?.history?.length ? riskData.history : [];
   const riskFallbackFromAnomalyTrend = anomalyTrend?.length
     ? anomalyTrend.map((p) => ({
-        timestamp: p.ts,
+        timestamp: p.timestamp,
         risk_score: Math.max(0, Math.min(100, 25 + p.total * 6)),
         state: p.total >= 10 ? 'VIOLATION' : p.total >= 7 ? 'AT_RISK' : p.total >= 4 ? 'DEGRADED' : 'NORMAL',
       }))

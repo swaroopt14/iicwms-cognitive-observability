@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -103,6 +103,23 @@ function normalizeSeverity(s: string): Severity {
   const x = (s || '').toLowerCase();
   if (x === 'critical' || x === 'high' || x === 'medium') return x;
   return 'low';
+}
+
+function parseSeverityFilter(v: string): Severity | 'all' {
+  if (v === 'all') return 'all';
+  if (v === 'critical' || v === 'high' || v === 'medium' || v === 'low') return v;
+  return 'all';
+}
+
+function parseStatusFilter(v: string): InsightStatus | 'all' {
+  if (v === 'all') return 'all';
+  if (v === 'open' || v === 'acknowledged' || v === 'resolved') return v;
+  return 'all';
+}
+
+function parseTimeRange(v: string): TimeRange {
+  if (v === '1h' || v === '24h' || v === '7d' || v === 'all') return v;
+  return '24h';
 }
 
 function coerceConfidence01(v: number): number {
@@ -296,7 +313,7 @@ export default function InsightFeedPage() {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h');
   const [statusFilter, setStatusFilter] = useState<InsightStatus | 'all'>('all');
 
-  const [localStore, setLocalStore] = useState<LocalStateStore>({});
+  const [localStore, setLocalStore] = useState<LocalStateStore>(() => loadLocalStore());
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const { data: insights, isLoading } = useQuery({
@@ -305,16 +322,22 @@ export default function InsightFeedPage() {
     refetchInterval: 10000,
   });
 
-  useEffect(() => {
-    setLocalStore(loadLocalStore());
-  }, []);
+  const displayInsights = useMemo(() => insights || [], [insights]);
 
-  const displayInsights = insights || [];
+  // Avoid Date.now() in render: anchor "now" to the newest insight timestamp (deterministic).
+  const anchorNowMs = useMemo(() => {
+    let maxTs = 0;
+    for (const i of displayInsights) {
+      const ts = new Date(i.timestamp).getTime();
+      if (Number.isFinite(ts)) maxTs = Math.max(maxTs, ts);
+    }
+    return maxTs;
+  }, [displayInsights]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     const cutoffMs = msForRange(timeRange);
-    const now = Date.now();
+    const now = anchorNowMs || 0;
 
     return displayInsights
       .slice()
@@ -336,25 +359,18 @@ export default function InsightFeedPage() {
         const hay = `${i.insight_id} ${i.summary} ${i.why_it_matters} ${(i.evidence_ids || []).join(' ')}`.toLowerCase();
         return hay.includes(q);
       });
-  }, [displayInsights, query, severity, timeRange, statusFilter, localStore]);
+  }, [displayInsights, query, severity, timeRange, statusFilter, localStore, anchorNowMs]);
+
+  const effectiveSelectedId = useMemo(() => {
+    if (!filtered.length) return null;
+    if (selectedId && filtered.some((x) => x.insight_id === selectedId)) return selectedId;
+    return filtered[0].insight_id;
+  }, [filtered, selectedId]);
 
   const selected = useMemo(() => {
-    if (!filtered.length) return null;
-    if (selectedId) {
-      return filtered.find((x) => x.insight_id === selectedId) || filtered[0];
-    }
-    return filtered[0];
-  }, [filtered, selectedId]);
-
-  useEffect(() => {
-    if (!selectedId && filtered.length) {
-      setSelectedId(filtered[0].insight_id);
-      return;
-    }
-    if (selectedId && filtered.length && !filtered.some((x) => x.insight_id === selectedId)) {
-      setSelectedId(filtered[0].insight_id);
-    }
-  }, [filtered, selectedId]);
+    if (!effectiveSelectedId) return null;
+    return filtered.find((x) => x.insight_id === effectiveSelectedId) || null;
+  }, [filtered, effectiveSelectedId]);
 
   const stats = useMemo(() => {
     const all = displayInsights;
@@ -472,7 +488,7 @@ export default function InsightFeedPage() {
 
           <div className="flex items-center gap-2">
             <Filter className="w-4 h-4 text-[var(--color-text-muted)]" />
-            <select className="input w-[160px]" value={severity} onChange={(e) => setSeverity(e.target.value as any)}>
+            <select className="input w-[160px]" value={severity} onChange={(e) => setSeverity(parseSeverityFilter(e.target.value))}>
               <option value="all">All severity</option>
               <option value="critical">Critical</option>
               <option value="high">High</option>
@@ -481,14 +497,14 @@ export default function InsightFeedPage() {
             </select>
           </div>
 
-          <select className="input w-[160px]" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)}>
+          <select className="input w-[160px]" value={statusFilter} onChange={(e) => setStatusFilter(parseStatusFilter(e.target.value))}>
             <option value="all">All status</option>
             <option value="open">Open</option>
             <option value="acknowledged">Acknowledged</option>
             <option value="resolved">Resolved</option>
           </select>
 
-          <select className="input w-[160px]" value={timeRange} onChange={(e) => setTimeRange(e.target.value as any)}>
+          <select className="input w-[160px]" value={timeRange} onChange={(e) => setTimeRange(parseTimeRange(e.target.value))}>
             <option value="1h">Last 1 hour</option>
             <option value="24h">Last 24 hours</option>
             <option value="7d">Last 7 days</option>

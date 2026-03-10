@@ -17,6 +17,20 @@ from dotenv import load_dotenv
 # Load .env BEFORE reading os.getenv
 load_dotenv()
 
+def _parse_bool(value: str | None, default: bool = False) -> bool:
+    """
+    Parse common boolean env var strings.
+    Accepts: true/false, 1/0, yes/no, y/n, on/off (case-insensitive).
+    """
+    if value is None:
+        return default
+    v = value.strip().lower()
+    if v in ("true", "1", "yes", "y", "on"):
+        return True
+    if v in ("false", "0", "no", "n", "off"):
+        return False
+    return default
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -83,7 +97,7 @@ def load_settings() -> Settings:
         APP_NAME=os.getenv("APP_NAME", Settings.APP_NAME),
         APP_VERSION=os.getenv("APP_VERSION", Settings.APP_VERSION),
         ENVIRONMENT=os.getenv("ENVIRONMENT", Settings.ENVIRONMENT),
-        DEBUG=os.getenv("DEBUG", "false").lower() == "true",
+        DEBUG=_parse_bool(os.getenv("DEBUG"), False),
         API_HOST=os.getenv("API_HOST", Settings.API_HOST),
         API_PORT=int(os.getenv("API_PORT", str(Settings.API_PORT))),
         API_PREFIX=os.getenv("API_PREFIX", Settings.API_PREFIX),
@@ -95,15 +109,15 @@ def load_settings() -> Settings:
         RATE_LIMIT_REQUESTS=int(os.getenv("RATE_LIMIT_REQUESTS", str(Settings.RATE_LIMIT_REQUESTS))),
         RATE_LIMIT_WINDOW_SECONDS=int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", str(Settings.RATE_LIMIT_WINDOW_SECONDS))),
         GEMINI_API_KEY=os.getenv("GEMINI_API_KEY", ""),
-        ENABLE_CREWAI=os.getenv("ENABLE_CREWAI", "false").lower() == "true",
+        ENABLE_CREWAI=_parse_bool(os.getenv("ENABLE_CREWAI"), False),
         SQLITE_DB_PATH=os.getenv("SQLITE_DB_PATH", Settings.SQLITE_DB_PATH),
-        ENABLE_NEO4J=os.getenv("ENABLE_NEO4J", "false").lower() == "true",
+        ENABLE_NEO4J=_parse_bool(os.getenv("ENABLE_NEO4J"), False),
         NEO4J_URI=os.getenv("NEO4J_URI", ""),
         NEO4J_USERNAME=os.getenv("NEO4J_USERNAME", ""),
         NEO4J_PASSWORD=os.getenv("NEO4J_PASSWORD", ""),
         LOG_LEVEL=os.getenv("LOG_LEVEL", Settings.LOG_LEVEL),
         LOG_FORMAT=os.getenv("LOG_FORMAT", Settings.LOG_FORMAT),
-        ENABLE_SLACK_ALERTS=os.getenv("ENABLE_SLACK_ALERTS", "false").lower() == "true",
+        ENABLE_SLACK_ALERTS=_parse_bool(os.getenv("ENABLE_SLACK_ALERTS"), False),
         SLACK_WEBHOOK_URL=os.getenv("SLACK_WEBHOOK_URL", ""),
         SLACK_ALERT_MIN_SEVERITY=os.getenv("SLACK_ALERT_MIN_SEVERITY", Settings.SLACK_ALERT_MIN_SEVERITY),
         SLACK_ALERT_MIN_RISK_STATE=os.getenv("SLACK_ALERT_MIN_RISK_STATE", Settings.SLACK_ALERT_MIN_RISK_STATE),

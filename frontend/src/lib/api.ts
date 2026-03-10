@@ -665,11 +665,44 @@ export const fetchComplianceSummary = async (): Promise<ComplianceSummary> => {
   }, mockComplianceSummary);
 };
 
+const _workflowFallback = (): Workflow[] => ([
+  {
+    workflow_id: 'wf_onboarding_17',
+    name: 'User Onboarding',
+    status: 'running',
+    current_step: 'VERIFY',
+    started_at: new Date(Date.now() - 600000).toISOString(),
+    expected_duration: 300,
+    actual_duration: 580,
+    project_id: 'proj_customer_onboarding',
+    project_name: 'Customer Onboarding Platform',
+    environment: 'production',
+    context_tag: 'new_update',
+    input_source: 'client_side',
+    issue_category: 'client_side_error',
+  },
+  {
+    workflow_id: 'wf_deployment_03',
+    name: 'Service Deployment',
+    status: 'delayed',
+    current_step: 'DEPLOY',
+    started_at: new Date(Date.now() - 500000).toISOString(),
+    expected_duration: 240,
+    actual_duration: 480,
+    project_id: 'proj_platform_release',
+    project_name: 'Platform Release Engineering',
+    environment: 'production',
+    context_tag: 'deployment_workflow',
+    input_source: 'github',
+    issue_category: 'deployment_pipeline',
+  },
+]);
+
 export const fetchWorkflows = async (): Promise<Workflow[]> => {
   return tryApi(async () => {
     const { data } = await api.get('/workflows');
     const rows = Array.isArray(data) ? data : data.workflows || [];
-    return rows.map((w: Record<string, unknown>) => ({
+    const mapped = rows.map((w: Record<string, unknown>) => ({
       workflow_id: String(w.workflow_id || w.id || ''),
       name: String(w.name || w.workflow_id || w.id || 'workflow'),
       status: String(w.status || 'unknown'),
@@ -684,38 +717,9 @@ export const fetchWorkflows = async (): Promise<Workflow[]> => {
       input_source: w.input_source ? String(w.input_source) : undefined,
       issue_category: w.issue_category ? String(w.issue_category) : undefined,
     }));
-  }, [
-    {
-      workflow_id: 'wf_onboarding_17',
-      name: 'User Onboarding',
-      status: 'running',
-      current_step: 'VERIFY',
-      started_at: new Date(Date.now() - 600000).toISOString(),
-      expected_duration: 300,
-      actual_duration: 580,
-      project_id: 'proj_customer_onboarding',
-      project_name: 'Customer Onboarding Platform',
-      environment: 'production',
-      context_tag: 'new_update',
-      input_source: 'client_side',
-      issue_category: 'client_side_error',
-    },
-    {
-      workflow_id: 'wf_deployment_03',
-      name: 'Service Deployment',
-      status: 'delayed',
-      current_step: 'DEPLOY',
-      started_at: new Date(Date.now() - 500000).toISOString(),
-      expected_duration: 240,
-      actual_duration: 480,
-      project_id: 'proj_platform_release',
-      project_name: 'Platform Release Engineering',
-      environment: 'production',
-      context_tag: 'deployment_workflow',
-      input_source: 'github',
-      issue_category: 'deployment_pipeline',
-    },
-  ]);
+    // Enterprise UX: when backend is up but no data exists yet, still show mock workflows.
+    return mapped.length ? mapped : _workflowFallback();
+  }, _workflowFallback());
 };
 
 export const fetchWorkflowGraph = async (id: string): Promise<WorkflowGraph> => {
@@ -735,7 +739,9 @@ export const fetchWorkflowStats = async (id: string): Promise<WorkflowStats> => 
 export const fetchCausalLinks = async (): Promise<CausalLink[]> => {
   return tryApi(async () => {
     const { data } = await api.get('/causal/links');
-    return Array.isArray(data) ? data : data.links || [];
+    const rows = Array.isArray(data) ? data : data.links || [];
+    // Enterprise UX: when backend is up but returns empty, use demo causal links for the UI.
+    return rows.length ? rows : mockCausalLinks;
   }, mockCausalLinks);
 };
 
@@ -811,10 +817,17 @@ export const fetchRecentMetrics = async () => {
 };
 
 export const fetchWorkflowTimeline = async (workflowId: string): Promise<TimelineData> => {
+  const fallback = mockTimelines[workflowId] || mockTimelines['wf_onboarding_17'];
   return tryApi(async () => {
     const { data } = await api.get(`/workflow/${workflowId}/timeline`);
-    return data;
-  }, mockTimelines[workflowId] || mockTimelines['wf_onboarding_17']);
+    // Enterprise UX: backend might be up but have no workflow events yet.
+    // In that case we return a rich mock timeline so the UI isn't empty.
+    const t = data as Partial<TimelineData> | null | undefined;
+    if (t && Array.isArray(t.nodes) && t.nodes.length > 0) {
+      return t as TimelineData;
+    }
+    return fallback;
+  }, fallback);
 };
 
 export const fetchScenarios = async () => {
@@ -1114,48 +1127,143 @@ export const fetchScenarioExecutions = async () => {
 // Audit APIs
 // ============================================
 export const fetchAuditIncidents = async (limit = 25): Promise<AuditIncident[]> => {
+  const fallback: AuditIncident[] = Array.from({ length: Math.min(limit, 6) }, (_, i) => {
+    const minutesAgo = 6 * (i + 1);
+    const riskScore = [82, 71, 64, 55, 48, 39][i] ?? 42;
+    const riskState = i === 0 ? 'AT_RISK' : i === 1 ? 'VIOLATION' : i === 2 ? 'DEGRADED' : 'NORMAL';
+    return {
+      incident_id: `inc_${String(100 + i)}`,
+      cycle_id: `cycle_${String(100 + i)}`,
+      timestamp: new Date(Date.now() - minutesAgo * 60000).toISOString(),
+      risk_score: riskScore,
+      risk_state: riskState,
+      anomaly_count: Math.max(0, 4 - i),
+      policy_hit_count: Math.max(0, 2 - Math.floor(i / 2)),
+      causal_link_count: Math.max(0, 2 - Math.floor(i / 3)),
+      status: i === 0 ? 'open' : 'closed',
+    };
+  });
+
   return tryApi(async () => {
     const { data } = await api.get('/audit/incidents', { params: { limit } });
-    return Array.isArray(data) ? data : data.incidents || [];
-  }, []);
+    const rows = Array.isArray(data) ? data : data.incidents || [];
+    // When backend is up but no audit cycles exist yet, show demo incidents instead of empty UI.
+    return rows.length ? rows : fallback;
+  }, fallback);
 };
 
 export const fetchAuditIncident = async (incidentId: string): Promise<AuditIncidentDetail> => {
-  return tryApi(async () => {
-    const { data } = await api.get(`/audit/incident/${incidentId}`);
-    return data;
-  }, {
+  const fallback: AuditIncidentDetail = {
     incident_id: incidentId,
     cycle_id: incidentId,
     timestamp: new Date().toISOString(),
-    counts: { anomalies: 0, policy_hits: 0, risk_signals: 0, causal_links: 0, recommendations: 0 },
-    evidence_ids: [],
-    cycle_sha256: '',
-    cycle: {},
-  });
+    counts: {
+      anomalies: Math.min(6, mockAnomalies.length),
+      policy_hits: Math.min(4, mockViolations.length),
+      risk_signals: 2,
+      causal_links: Math.min(3, mockCausalLinks.length),
+      recommendations: 2,
+    },
+    evidence_ids: [
+      ...(mockInsights[0]?.evidence_ids || []),
+      ...(mockViolations[0]?.event_id ? [mockViolations[0].event_id] : []),
+      ...(mockEvents.slice(0, 3).map(e => e.event_id)),
+    ].filter(Boolean) as string[],
+    cycle_sha256: 'demo_sha256_not_persisted',
+    cycle: {
+      demo: true,
+      notes: 'Backend returned no persisted audit cycle; showing mock forensic snapshot.',
+    },
+  };
+
+  return tryApi(async () => {
+    const { data } = await api.get(`/audit/incident/${incidentId}`);
+    const d = data as Partial<AuditIncidentDetail> | null | undefined;
+    // Empty-aware fallback when backend is reachable but has no data yet.
+    if (d && (d.cycle_sha256 || (d.counts && Object.values(d.counts).some((v) => Number(v) > 0)))) {
+      return d as AuditIncidentDetail;
+    }
+    return fallback;
+  }, fallback);
 };
 
 export const fetchAuditTimeline = async (incidentId: string): Promise<AuditTimelineItem[]> => {
+  const fallback: AuditTimelineItem[] = [
+    {
+      ts: new Date(Date.now() - 14 * 60000).toISOString(),
+      kind: 'anomaly',
+      id: mockAnomalies[0]?.anomaly_id || 'anom_demo_001',
+      agent: mockAnomalies[0]?.agent || 'ResourceAgent',
+      summary: mockAnomalies[0]?.details || 'Sustained CPU spike detected on vm_2 (demo)',
+      confidence: ((mockAnomalies[0]?.confidence ?? 80) / 100),
+      evidence_ids: mockAnomalies[0]?.evidence_ids || ['evt_1200', 'metric_892'],
+    },
+    {
+      ts: new Date(Date.now() - 12 * 60000).toISOString(),
+      kind: 'policy_hit',
+      id: mockViolations[0]?.violation_id || 'v_demo_001',
+      agent: 'ComplianceAgent',
+      summary: mockViolations[0]?.details || 'After-hours write detected from unusual VPN location (demo)',
+      confidence: 0.9,
+      evidence_ids: [mockViolations[0]?.event_id || 'evt_1045'].filter(Boolean) as string[],
+    },
+    {
+      ts: new Date(Date.now() - 10 * 60000).toISOString(),
+      kind: 'risk_signal',
+      id: 'risk_demo_01',
+      agent: 'RiskForecastAgent',
+      summary: 'Risk trending upward: projected SLA breach within 10-15 minutes if saturation continues (demo).',
+      confidence: 0.82,
+      evidence_ids: (mockInsights[0]?.evidence_ids || []).slice(0, 3),
+    },
+    {
+      ts: new Date(Date.now() - 8 * 60000).toISOString(),
+      kind: 'causal_link',
+      id: mockCausalLinks[0]?.link_id || 'link_demo_01',
+      agent: mockCausalLinks[0]?.agent || 'CausalAgent',
+      summary: mockCausalLinks[0]?.easy_summary || mockCausalLinks[0]?.reasoning || 'Latency spike caused retries, driving CPU saturation and deployment delays (demo).',
+      confidence: mockCausalLinks[0]?.confidence ?? 0.78,
+      evidence_ids: mockCausalLinks[0]?.evidence_ids || (mockInsights[0]?.evidence_ids || []),
+    },
+    {
+      ts: new Date(Date.now() - 6 * 60000).toISOString(),
+      kind: 'recommendation',
+      id: 'rec_demo_01',
+      agent: 'RecommendationEngineAgent',
+      summary: 'Throttle concurrent deploy jobs; route traffic to backup path; require post-hoc approval within 4 hours (demo).',
+      confidence: 0.86,
+      evidence_ids: (mockInsights[0]?.evidence_ids || []).slice(0, 2),
+    },
+  ];
+
   return tryApi(async () => {
     const { data } = await api.get(`/audit/incident/${incidentId}/timeline`);
-    return Array.isArray(data) ? data : data.timeline || [];
-  }, []);
+    const rows = Array.isArray(data) ? data : data.timeline || [];
+    return rows.length ? rows : fallback;
+  }, fallback);
 };
 
 export const fetchRawAuditEvent = async (eventId: string): Promise<RawAuditEvent> => {
+  const ev = mockEvents.find((e) => e.event_id === eventId);
+  const fallback: RawAuditEvent = {
+    event_id: eventId,
+    type: ev?.type || 'UNKNOWN',
+    workflow_id: ev?.workflow_id ?? null,
+    actor: ev?.actor || 'demo',
+    resource: ev?.resource ?? null,
+    timestamp: ev?.timestamp || new Date().toISOString(),
+    metadata: (ev?.metadata || { demo: true }) as Record<string, unknown>,
+    observed_at: new Date().toISOString(),
+  };
+
   return tryApi(async () => {
     const { data } = await api.get(`/audit/event/${eventId}/raw`);
-    return data;
-  }, {
-    event_id: eventId,
-    type: 'UNKNOWN',
-    workflow_id: null,
-    actor: 'n/a',
-    resource: null,
-    timestamp: new Date().toISOString(),
-    metadata: {},
-    observed_at: new Date().toISOString(),
-  });
+    const d = data as Partial<RawAuditEvent> | null | undefined;
+    if (d && (d.type || (d.metadata && Object.keys(d.metadata).length))) {
+      return d as RawAuditEvent;
+    }
+    return fallback;
+  }, fallback);
 };
 
 export const exportAuditReport = async (incidentId: string, format: 'json' | 'csv' = 'json') => {

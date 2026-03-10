@@ -585,7 +585,7 @@ export function RiskGraph<T extends RiskGraphPoint>({
     }
 
     // Calculate points
-    const points: { x: number; y: number; data: RiskDataPoint }[] = data.map((d, i) => ({
+    const points: { x: number; y: number; data: T }[] = data.map((d, i) => ({
       x: padding.left + (plotWidth / (data.length - 1 || 1)) * i,
       y: padding.top + plotHeight - (d.risk_score / 100) * plotHeight,
       data: d,

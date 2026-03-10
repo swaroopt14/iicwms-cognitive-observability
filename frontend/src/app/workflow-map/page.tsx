@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   GitBranch,
   ZoomIn,
@@ -596,9 +597,11 @@ function TimelineCanvas({
 function EventDetailsPanel({
   node,
   onClose,
+  onNavigate,
 }: {
   node: EventNode | null;
   onClose: () => void;
+  onNavigate: (path: string) => void;
 }) {
   void onClose;
   if (!node) {
@@ -632,6 +635,23 @@ function EventDetailsPanel({
   const tenantKey = details['tenant_key'];
   const eventPayload = details['event_payload'];
   const logPayload = details['log_payload'];
+
+  const extractEvidenceId = (d: Record<string, unknown>, fallback: string): string | null => {
+    const evidenceIds = d['evidence_ids'];
+    if (Array.isArray(evidenceIds) && typeof evidenceIds[0] === 'string' && String(evidenceIds[0]).length) {
+      return String(evidenceIds[0]);
+    }
+    const eventId = d['event_id'];
+    if (typeof eventId === 'string' && eventId.length) return eventId;
+    const observedEventId = d['observed_event_id'];
+    if (typeof observedEventId === 'string' && observedEventId.length) return observedEventId;
+    const id = d['id'];
+    if (typeof id === 'string' && id.length) return id;
+    if (fallback.startsWith('evt_') || fallback.startsWith('metric_') || fallback.startsWith('anom_')) return fallback;
+    return null;
+  };
+
+  const primaryEvidenceId = extractEvidenceId(details as Record<string, unknown>, node.id);
 
   const toJson = (v: unknown): string => {
     try {
@@ -885,11 +905,17 @@ function EventDetailsPanel({
 
         {/* Actions */}
         <div className="space-y-2 pt-2">
-          <button className="btn btn-primary btn-sm w-full">
+          <button
+            className="btn btn-primary btn-sm w-full"
+            onClick={() => {
+              const q = primaryEvidenceId ? `?evidence=${encodeURIComponent(primaryEvidenceId)}` : '';
+              onNavigate(`/audit${q}`);
+            }}
+          >
             <ExternalLink className="w-3.5 h-3.5" />
             View Evidence Explorer
           </button>
-          <button className="btn btn-secondary btn-sm w-full">
+          <button className="btn btn-secondary btn-sm w-full" onClick={() => onNavigate('/causal-analysis')}>
             Jump to System Graph
           </button>
         </div>
@@ -1097,6 +1123,7 @@ function EmptyState({
 // Main Page
 // ============================================
 export default function WorkflowMapPage() {
+  const router = useRouter();
   const ALL_LANES: Set<EventLaneId> = new Set(['code', 'workflow', 'resource', 'human', 'compliance']);
 
   const [workflows, setWorkflows] = useState<WorkflowOption[]>([]);
@@ -1388,7 +1415,7 @@ export default function WorkflowMapPage() {
                 )}
               </div>
               <div style={{ height: 'calc(100% - 72px)' }}>
-                <EventDetailsPanel node={selectedNode} onClose={() => setSelectedNode(null)} />
+                <EventDetailsPanel node={selectedNode} onClose={() => setSelectedNode(null)} onNavigate={(path) => router.push(path)} />
               </div>
             </aside>
           </>

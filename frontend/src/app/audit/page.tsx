@@ -1,7 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Suspense, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useSearchParams } from 'next/navigation';
 import {
   fetchAuditIncidents,
   fetchAuditIncident,
@@ -58,9 +59,13 @@ function TimelineRow({ item, onOpenEvidence }: { item: AuditTimelineItem; onOpen
   );
 }
 
-export default function AuditPage() {
+function AuditPageInner() {
+  const searchParams = useSearchParams();
+  const initialIncident = searchParams.get('incident');
+  const initialEvidence = searchParams.get('evidence');
+
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
-  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(initialEvidence);
   const [exportBusy, setExportBusy] = useState<'json' | 'csv' | null>(null);
 
   const { data: incidents } = useQuery({
@@ -74,8 +79,11 @@ export default function AuditPage() {
     if (selectedIncidentId) {
       return list.find((i) => i.incident_id === selectedIncidentId) || null;
     }
+    if (initialIncident) {
+      return list.find((i) => i.incident_id === initialIncident) || list[0] || null;
+    }
     return list[0] || null;
-  }, [incidents, selectedIncidentId]);
+  }, [incidents, selectedIncidentId, initialIncident]);
 
   const { data: detail } = useQuery({
     queryKey: ['auditIncidentDetail', selectedIncident?.incident_id],
@@ -277,5 +285,14 @@ export default function AuditPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function AuditPage() {
+  // Next.js requires a Suspense boundary for useSearchParams() in app router pages.
+  return (
+    <Suspense fallback={<div className="card p-6">Loading audit view...</div>}>
+      <AuditPageInner />
+    </Suspense>
   );
 }

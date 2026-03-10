@@ -25,10 +25,14 @@ logger = logging.getLogger(__name__)
 from blackboard import ReasoningCycle, SharedState, get_shared_state
 from observation import ObservationLayer, get_observation_layer
 
-try:
-    from .vector_store import ChronosVectorStore
-except ModuleNotFoundError:
-    ChronosVectorStore = None
+# Vector store is optional and can have heavy dependencies (chromadb, sentence-transformers).
+# Avoid importing it unless explicitly enabled to keep startup and tests fast/offline-safe.
+ChronosVectorStore = None
+if os.getenv("ENABLE_VECTOR_STORE", "false").lower().strip() == "true":
+    try:
+        from .vector_store import ChronosVectorStore
+    except ModuleNotFoundError:
+        ChronosVectorStore = None
 
 try:
     from langgraph.graph import END, StateGraph
@@ -262,12 +266,16 @@ class ReasoningSynthesizer:
         """Initialize the LLM for dynamic synthesis."""
         from dotenv import load_dotenv
         load_dotenv()
+        enable_llm = os.getenv("ENABLE_RAG_LLM", "false").lower().strip() == "true"
+        if not enable_llm:
+            # Keep RAG deterministic by default. LLM usage is opt-in.
+            return None
         api_key = os.getenv("GEMINI_API_KEY")
         if api_key:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=api_key)
-                llm = genai.GenerativeModel("gemini-2.5-flash")
+                llm = genai.GenerativeModel(os.getenv("RAG_LLM_MODEL", "gemini-2.5-flash"))
                 logger.info("LLM initialized for dynamic synthesis")
                 return llm
             except ImportError:

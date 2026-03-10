@@ -121,6 +121,18 @@ class SlackNotifier:
         key = "|".join([severity.upper(), rs, ",".join(top_anoms), ",".join(top_policies), top_rec])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
+    def _clamp_text(self, s: str, max_len: int) -> str:
+        s = (s or "").strip()
+        if len(s) <= max_len:
+            return s
+        return s[: max(0, max_len - 1)].rstrip() + "…"
+
+    def _link(self, path: str) -> str:
+        base = self._cfg.frontend_base_url.rstrip("/")
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{base}{path}"
+
     async def send_cycle_alert(
         self,
         cycle: ReasoningCycle,
@@ -139,7 +151,9 @@ class SlackNotifier:
         confidence = round((insight.confidence if insight else 0.8) * 100, 1)
         risk = (risk_state or "N/A").upper()
         rec = cycle.recommendations[0].action if cycle.recommendations else "Review incident details in Chronos"
-        incident_url = f"{self._cfg.frontend_base_url.rstrip('/')}/audit"
+        audit_url = self._link("/audit")
+        insights_url = self._link("/insight-feed")
+        rca_url = self._link("/causal-analysis")
 
         top_anoms = sorted({a.type for a in cycle.anomalies})
         top_policies = sorted({p.policy_id for p in cycle.policy_hits})
@@ -156,19 +170,98 @@ class SlackNotifier:
             "action: add tests / reduce churn / re-review" if code_anoms else "",
         ])) or "no code-signal context"
 
+        summary_short = self._clamp_text(summary, 240)
+        rec_short = self._clamp_text(rec, 180)
+        why = self._clamp_text(getattr(insight, "why_it_matters", "") if insight else "", 260)
+        impact = self._clamp_text(getattr(insight, "what_will_happen_if_ignored", "") if insight else "", 260)
+
+        score_str = f"{float(risk_score):.1f}" if risk_score is not None else "n/a"
+        top_anoms_line = ", ".join(list(top_anoms)[:6]) if top_anoms else "n/a"
+        top_policies_line = ", ".join(list(top_policies)[:6]) if top_policies else "n/a"
+
+        # Fallback plaintext for clients that ignore blocks.
         text = "\n".join([
-            f"*CHRONOS ALERT*  cycle `{cycle.cycle_id}`  severity `{severity.upper()}`  risk `{risk}`" + (f" ({risk_score})" if risk_score is not None else ""),
-            f"*Where it went wrong:* {summary}",
-            f"*For DevOps/SRE:* {devops_line}",
-            f"*For SDE:* {sde_line}",
-            f"*Recommended action (top):* {rec}",
-            f"*Evidence counts:* anomalies={len(cycle.anomalies)} policy_hits={len(cycle.policy_hits)} causal_links={len(cycle.causal_links)}  confidence={confidence}%",
-            f"*Top anomaly types:* {', '.join(top_anoms[:6]) if top_anoms else 'n/a'}",
-            f"<{incident_url}|Open Audit Investigation>",
+            f"CHRONOS ALERT | cycle {cycle.cycle_id} | severity {severity.upper()} | risk {risk} | risk_score {score_str}",
+            f"Summary: {summary_short}",
+            f"Top action: {rec_short}",
+            f"Counts: anomalies={len(cycle.anomalies)} policy_hits={len(cycle.policy_hits)} causal_links={len(cycle.causal_links)} confidence={confidence}%",
+            f"Top anomalies: {top_anoms_line}",
+            f"Top policies: {top_policies_line}",
+            f"Audit: {audit_url}",
         ])
+
+        blocks: list[dict[str, Any]] = []
+        blocks.append({
+            "type": "header",
+            "text": {"type": "plain_text", "text": "Chronos Alert", "emoji": True},
+        })
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Cycle:* `{cycle.cycle_id}`\n*Summary:* {summary_short}",
+            },
+        })
+        blocks.append({
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Severity*\n`{severity.upper()}`"},
+                {"type": "mrkdwn", "text": f"*Risk State*\n`{risk}`"},
+                {"type": "mrkdwn", "text": f"*Risk Score*\n`{score_str}`"},
+                {"type": "mrkdwn", "text": f"*Confidence*\n`{confidence}%`"},
+                {"type": "mrkdwn", "text": f"*Anomalies*\n`{len(cycle.anomalies)}`"},
+                {"type": "mrkdwn", "text": f"*Policy Hits*\n`{len(cycle.policy_hits)}`"},
+            ],
+        })
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*Top recommended action:*\n{rec_short}"},
+        })
+
+        if why:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Why it matters:*\n{why}"},
+            })
+        if impact:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*If ignored:*\n{impact}"},
+            })
+
+        blocks.append({
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Top anomaly types*\n{top_anoms_line}"},
+                {"type": "mrkdwn", "text": f"*Top policy IDs*\n{top_policies_line}"},
+            ],
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"DevOps/SRE: {self._clamp_text(devops_line, 120)}"},
+                {"type": "mrkdwn", "text": f"SDE: {self._clamp_text(sde_line, 120)}"},
+            ],
+        })
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {"type": "button", "text": {"type": "plain_text", "text": "Open Audit", "emoji": True}, "url": audit_url},
+                {"type": "button", "text": {"type": "plain_text", "text": "Insight Feed", "emoji": True}, "url": insights_url},
+                {"type": "button", "text": {"type": "plain_text", "text": "Root Cause", "emoji": True}, "url": rca_url},
+            ],
+        })
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"De-dup: `{self._fingerprint(cycle, insight=insight, risk_state=risk_state)}` | Cooldown: {self._cfg.cooldown_seconds}s"},
+            ],
+        })
 
         payload = {
             "text": text,
+            "blocks": blocks,
         }
 
         async with httpx.AsyncClient(timeout=8.0) as client:

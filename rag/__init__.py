@@ -10,14 +10,20 @@ if TYPE_CHECKING:
 
 __all__ = ["get_rag_engine", "force_refresh_rag_engine"]
 
-try:
-    from .vector_store import ChronosVectorStore, VectorDocument
-    __all__.extend(["ChronosVectorStore", "VectorDocument"])
-except ModuleNotFoundError:
-    # Optional dependency path (sentence-transformers/chromadb) is not required
-    # for core API startup.
-    ChronosVectorStore = None
-    VectorDocument = None
+# Avoid importing optional heavy vector-store dependencies unless enabled.
+# This keeps core imports fast and works in offline environments.
+import os
+ChronosVectorStore = None
+VectorDocument = None
+if os.getenv("ENABLE_VECTOR_STORE", "false").lower().strip() == "true":
+    try:
+        from .vector_store import ChronosVectorStore, VectorDocument
+        __all__.extend(["ChronosVectorStore", "VectorDocument"])
+    except ModuleNotFoundError:
+        # Optional dependency path (sentence-transformers/chromadb) is not required
+        # for core API startup.
+        ChronosVectorStore = None
+        VectorDocument = None
 
 # Lazy import to avoid circular dependency
 def get_rag_engine():

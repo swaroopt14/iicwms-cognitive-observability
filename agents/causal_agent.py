@@ -317,8 +317,9 @@ class CausalAgent:
         secs = int(max(1, temporal_distance.total_seconds()))
         cause = cause_type.replace("_", " ").title()
         effect = effect_type.replace("_", " ").title()
+        # Keep this concise and enterprise-friendly; UI may display this in multiple places.
         return (
-            f"Observed sequence: {cause} happened before {effect} "
-            f"(~{secs}s gap). Likely link: {base_reason}. "
-            "Use linked evidence IDs to validate and act."
+            f"Temporal order: {cause} preceded {effect} by ~{secs}s. "
+            f"Hypothesis: {base_reason}. "
+            "Next: validate quickly using the linked evidence IDs before taking corrective action."
         )
